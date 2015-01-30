@@ -12,20 +12,24 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QGridLayout>
+#include <QFileInfo>
 #include <QHeaderView>
+#include <QLineEdit>
 #include <QMessageBox>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QThread>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QXmlStreamReader>
 
 #include <NetworkAccessManager.h>
-
-#include "Application.h"
 
 #include "ModelsBrowser.h"
 
 const char* MODEL_TYPE_NAMES[] = { "entities", "heads", "skeletons", "attachments" };
 
-static const QString S3_URL = "http://highfidelity-public.s3-us-west-1.amazonaws.com";
+static const QString S3_URL = "http://s3.amazonaws.com/hifi-public";
 static const QString PUBLIC_URL = "http://public.highfidelity.io";
 static const QString MODELS_LOCATION = "models/";
 
@@ -182,7 +186,7 @@ ModelHandler::ModelHandler(ModelType modelsType, QWidget* parent) :
     QObject(parent),
     _initiateExit(false),
     _type(modelsType),
-    _nameFilter(".*(fst|fbx|FST|FBX)")
+    _nameFilter(".*fst")
 {
     // set headers data
     QStringList headerData;
@@ -220,7 +224,7 @@ void ModelHandler::update() {
     }
     for (int i = 0; i < _model.rowCount(); ++i) {
         QUrl url(_model.item(i,0)->data(Qt::UserRole).toString());
-        NetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
+        QNetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
         QNetworkRequest request(url);
         QNetworkReply* reply = networkAccessManager.head(request);
         connect(reply, SIGNAL(finished()), SLOT(downloadFinished()));
@@ -253,7 +257,6 @@ void ModelHandler::downloadFinished() {
         parseHeaders(reply);
     }
     reply->deleteLater();
-    sender()->deleteLater();
 }
 
 void ModelHandler::queryNewFiles(QString marker) {
@@ -272,7 +275,7 @@ void ModelHandler::queryNewFiles(QString marker) {
     
     // Download
     url.setQuery(query);
-    NetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
+    QNetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
     QNetworkRequest request(url);
     QNetworkReply* reply = networkAccessManager.get(request);
     connect(reply, SIGNAL(finished()), SLOT(downloadFinished()));

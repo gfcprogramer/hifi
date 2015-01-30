@@ -11,8 +11,19 @@
 
 #include "AABox.h"
 #include "AACube.h"
+#include "Extents.h"
 #include "GeometryUtil.h"
 #include "SharedUtil.h"
+
+
+AABox::AABox(const AACube& other) : 
+    _corner(other.getCorner()), _scale(other.getScale(), other.getScale(), other.getScale()) {
+}
+
+AABox::AABox(const Extents& other) : 
+    _corner(other.minimum),
+    _scale(other.maximum - other.minimum) {
+}
 
 AABox::AABox(const glm::vec3& corner, float size) : 
     _corner(corner), _scale(size, size, size) {
@@ -22,7 +33,7 @@ AABox::AABox(const glm::vec3& corner, const glm::vec3& dimensions) :
     _corner(corner), _scale(dimensions) {
 };
 
-AABox::AABox() : _corner(0.0f, 0.0f, 0.0f), _scale(0.0f, 0.0f, 0.0f) {
+AABox::AABox() : _corner(std::numeric_limits<float>::infinity()), _scale(0.0f) {
 };
 
 glm::vec3 AABox::calcCenter() const {
@@ -58,7 +69,7 @@ glm::vec3 AABox::getVertex(BoxVertex vertex) const {
             return _corner + glm::vec3(0, 0, _scale.z);
         case TOP_RIGHT_FAR:
             return _corner + glm::vec3(0, _scale.y, _scale.z);
-		default: //quiet windows warnings
+        default: //quiet windows warnings
         case TOP_LEFT_FAR:
             return _corner + _scale;
     }
@@ -346,7 +357,7 @@ glm::vec3 AABox::getClosestPointOnFace(const glm::vec3& point, BoxFace face) con
             return glm::clamp(point, glm::vec3(_corner.x, _corner.y, _corner.z),
                 glm::vec3(_corner.x + _scale.z, _corner.y + _scale.y, _corner.z));
     
-		default: //quiet windows warnings
+        default: //quiet windows warnings
         case MAX_Z_FACE:
             return glm::clamp(point, glm::vec3(_corner.x, _corner.y, _corner.z + _scale.z),
                 glm::vec3(_corner.x + _scale.x, _corner.y + _scale.y, _corner.z + _scale.z));
@@ -427,7 +438,7 @@ glm::vec4 AABox::getPlane(BoxFace face) const {
         case MIN_Y_FACE: return glm::vec4(0.0f, -1.0f, 0.0f, _corner.y);
         case MAX_Y_FACE: return glm::vec4(0.0f, 1.0f, 0.0f, -_corner.y - _scale.y);
         case MIN_Z_FACE: return glm::vec4(0.0f, 0.0f, -1.0f, _corner.z);
-		default: //quiet windows warnings
+        default: //quiet windows warnings
         case MAX_Z_FACE: return glm::vec4(0.0f, 0.0f, 1.0f, -_corner.z - _scale.z);
     }
 }
@@ -439,7 +450,38 @@ BoxFace AABox::getOppositeFace(BoxFace face) {
         case MIN_Y_FACE: return MAX_Y_FACE;
         case MAX_Y_FACE: return MIN_Y_FACE;
         case MIN_Z_FACE: return MAX_Z_FACE;
-		default: //quiet windows warnings
+        default: //quiet windows warnings
         case MAX_Z_FACE: return MIN_Z_FACE;
     }
+}
+
+AABox AABox::clamp(const glm::vec3& min, const glm::vec3& max) const {
+    glm::vec3 clampedCorner = glm::clamp(_corner, min, max);
+    glm::vec3 clampedTopFarLeft = glm::clamp(calcTopFarLeft(), min, max);
+    glm::vec3 clampedScale = clampedTopFarLeft - clampedCorner;
+    
+    return AABox(clampedCorner, clampedScale);
+}
+
+AABox AABox::clamp(float min, float max) const {
+    glm::vec3 clampedCorner = glm::clamp(_corner, min, max);
+    glm::vec3 clampedTopFarLeft = glm::clamp(calcTopFarLeft(), min, max);
+    glm::vec3 clampedScale = clampedTopFarLeft - clampedCorner;
+    
+    return AABox(clampedCorner, clampedScale);
+}
+
+AABox& AABox::operator += (const glm::vec3& point) {
+    _corner = glm::min(_corner, point);
+    _scale = glm::max(_scale, point - _corner);
+
+    return (*this);
+}
+
+AABox& AABox::operator += (const AABox& box) {
+    if (!box.isInvalid()) {
+        (*this) += box._corner;
+       _scale = glm::max(_scale, box.calcTopFarLeft() - _corner);
+    }
+    return (*this);
 }

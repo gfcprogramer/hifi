@@ -9,19 +9,24 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QTimer>
 #include <QUuid>
 
 #include <time.h>
+
+#include <AccountManager.h>
 #include <HTTPConnection.h>
-#include <Logging.h>
+#include <LogHandler.h>
 #include <UUID.h>
 
 #include "../AssignmentClient.h"
 
 #include "OctreeServer.h"
 #include "OctreeServerConsts.h"
+#include "OctreeServerDatagramProcessor.h"
 
 OctreeServer* OctreeServer::_instance = NULL;
 int OctreeServer::_clientCount = 0;
@@ -244,6 +249,10 @@ OctreeServer::OctreeServer(const QByteArray& packet) :
 
     _averageLoopTime.updateAverage(0);
     qDebug() << "Octree server starting... [" << this << "]";
+    
+    // make sure the AccountManager has an Auth URL for payment redemptions
+    
+    AccountManager::getInstance().setAuthURL(DEFAULT_NODE_AUTH_URL);
 }
 
 OctreeServer::~OctreeServer() {
@@ -294,7 +303,7 @@ void OctreeServer::initHTTPManager(int port) {
     _httpManager = new HTTPManager(port, documentRoot, this, this);
 }
 
-bool OctreeServer::handleHTTPRequest(HTTPConnection* connection, const QUrl& url) {
+bool OctreeServer::handleHTTPRequest(HTTPConnection* connection, const QUrl& url, bool skipSubHandler) {
 
 #ifdef FORCE_CRASH
     if (connection->requestOperation() == QNetworkAccessManager::GetOperation
@@ -350,7 +359,7 @@ bool OctreeServer::handleHTTPRequest(HTTPConnection* connection, const QUrl& url
         statsString += "Uptime: " + getUptime();
         statsString += "\r\n\r\n";
 
-        // display voxel file load time
+        // display octree file load time
         if (isInitialLoadComplete()) {
             if (isPersistEnabled()) {
                 statsString += QString("%1 File Persist Enabled...\r\n").arg(getMyServerName());
@@ -365,7 +374,7 @@ bool OctreeServer::handleHTTPRequest(HTTPConnection* connection, const QUrl& url
             statsString += "\r\n";
 
         } else {
-            statsString += "Voxels not yet loaded...\r\n";
+            statsString += "Octree file not yet loaded...\r\n";
         }
 
         statsString += "\r\n\r\n";
@@ -692,8 +701,8 @@ bool OctreeServer::handleHTTPRequest(HTTPConnection* connection, const QUrl& url
         statsString += "\r\n";
 
         const char* memoryScaleLabel;
-        const float MEGABYTES = 1000000.f;
-        const float GIGABYTES = 1000000000.f;
+        const float MEGABYTES = 1000000.0f;
+        const float GIGABYTES = 1000000000.0f;
         float memoryScale;
         if (OctreeElement::getTotalMemoryUsage() / MEGABYTES < 1000.0f) {
             memoryScaleLabel = "MB";
@@ -704,7 +713,7 @@ bool OctreeServer::handleHTTPRequest(HTTPConnection* connection, const QUrl& url
         }
 
         statsString += QString().sprintf("Element Node Memory Usage:       %8.2f %s\r\n",
-                                         OctreeElement::getVoxelMemoryUsage() / memoryScale, memoryScaleLabel);
+                                         OctreeElement::getOctreeMemoryUsage() / memoryScale, memoryScaleLabel);
         statsString += QString().sprintf("Octcode Memory Usage:            %8.2f %s\r\n",
                                          OctreeElement::getOctcodeMemoryUsage() / memoryScale, memoryScaleLabel);
         statsString += QString().sprintf("External Children Memory Usage:  %8.2f %s\r\n",
@@ -820,126 +829,294 @@ void OctreeServer::parsePayload() {
     }
 }
 
-void OctreeServer::readPendingDatagrams() {
-    QByteArray receivedPacket;
-    HifiSockAddr senderSockAddr;
+void OctreeServer::readPendingDatagram(const QByteArray& receivedPacket, const HifiSockAddr& senderSockAddr) {
+    auto nodeList = DependencyManager::get<NodeList>();
     
-    NodeList* nodeList = NodeList::getInstance();
-    
-    while (readAvailableDatagram(receivedPacket, senderSockAddr)) {
-        if (nodeList->packetVersionAndHashMatch(receivedPacket)) {
-            PacketType packetType = packetTypeForPacket(receivedPacket);
-            SharedNodePointer matchingNode = nodeList->sendingNodeForPacket(receivedPacket);
-            if (packetType == getMyQueryMessageType()) {
-                // If we got a query packet, then we're talking to an agent, and we
-                // need to make sure we have it in our nodeList.
-                if (matchingNode) {
-                    nodeList->updateNodeWithDataFromPacket(matchingNode, receivedPacket);
-                    OctreeQueryNode* nodeData = (OctreeQueryNode*)matchingNode->getLinkedData();
-                    if (nodeData && !nodeData->isOctreeSendThreadInitalized()) {
-                        
-                        // NOTE: this is an important aspect of the proper ref counting. The send threads/node data need to 
-                        // know that the OctreeServer/Assignment will not get deleted on it while it's still active. The 
-                        // solution is to get the shared pointer for the current assignment. We need to make sure this is the 
-                        // same SharedAssignmentPointer that was ref counted by the assignment client.                    
-                        SharedAssignmentPointer sharedAssignment = AssignmentClient::getCurrentAssignment();
-                        nodeData->initializeOctreeSendThread(sharedAssignment, matchingNode);
-                    }
+    if (nodeList->packetVersionAndHashMatch(receivedPacket)) {
+        PacketType packetType = packetTypeForPacket(receivedPacket);
+        SharedNodePointer matchingNode = nodeList->sendingNodeForPacket(receivedPacket);
+        if (packetType == getMyQueryMessageType()) {
+            // If we got a query packet, then we're talking to an agent, and we
+            // need to make sure we have it in our nodeList.
+            if (matchingNode) {
+                nodeList->updateNodeWithDataFromPacket(matchingNode, receivedPacket);
+                OctreeQueryNode* nodeData = (OctreeQueryNode*)matchingNode->getLinkedData();
+                if (nodeData && !nodeData->isOctreeSendThreadInitalized()) {
+                    
+                    // NOTE: this is an important aspect of the proper ref counting. The send threads/node data need to 
+                    // know that the OctreeServer/Assignment will not get deleted on it while it's still active. The 
+                    // solution is to get the shared pointer for the current assignment. We need to make sure this is the 
+                    // same SharedAssignmentPointer that was ref counted by the assignment client.                    
+                    SharedAssignmentPointer sharedAssignment = AssignmentClient::getCurrentAssignment();
+                    nodeData->initializeOctreeSendThread(sharedAssignment, matchingNode);
                 }
-            } else if (packetType == PacketTypeOctreeDataNack) {
-                // If we got a nack packet, then we're talking to an agent, and we
-                // need to make sure we have it in our nodeList.
-                if (matchingNode) {
-                    OctreeQueryNode* nodeData = (OctreeQueryNode*)matchingNode->getLinkedData();
-                    if (nodeData) {
-                        nodeData->parseNackPacket(receivedPacket);
-                    }
-                }
-            } else if (packetType == PacketTypeJurisdictionRequest) {
-                _jurisdictionSender->queueReceivedPacket(matchingNode, receivedPacket);
-            } else if (_octreeInboundPacketProcessor && getOctree()->handlesEditPacketType(packetType)) {
-                _octreeInboundPacketProcessor->queueReceivedPacket(matchingNode, receivedPacket);
-            } else {
-                // let processNodeData handle it.
-                NodeList::getInstance()->processNodeData(senderSockAddr, receivedPacket);
             }
+        } else if (packetType == PacketTypeOctreeDataNack) {
+            // If we got a nack packet, then we're talking to an agent, and we
+            // need to make sure we have it in our nodeList.
+            if (matchingNode) {
+                OctreeQueryNode* nodeData = (OctreeQueryNode*)matchingNode->getLinkedData();
+                if (nodeData) {
+                    nodeData->parseNackPacket(receivedPacket);
+                }
+            }
+        } else if (packetType == PacketTypeJurisdictionRequest) {
+            _jurisdictionSender->queueReceivedPacket(matchingNode, receivedPacket);
+        } else if (_octreeInboundPacketProcessor && getOctree()->handlesEditPacketType(packetType)) {
+            _octreeInboundPacketProcessor->queueReceivedPacket(matchingNode, receivedPacket);
+        } else {
+            // let processNodeData handle it.
+            DependencyManager::get<NodeList>()->processNodeData(senderSockAddr, receivedPacket);
         }
     }
 }
 
-void OctreeServer::run() {
-    _safeServerName = getMyServerName();
+void OctreeServer::setupDatagramProcessingThread() {
+    auto nodeList = DependencyManager::get<NodeList>();
     
-    // Before we do anything else, create our tree...
-    OctreeElement::resetPopulationStatistics();
-    _tree = createTree();
+    // we do not want this event loop to be the handler for UDP datagrams, so disconnect
+    disconnect(&nodeList->getNodeSocket(), 0, this, 0);
     
-    // use common init to setup common timers and logging
-    commonInit(getMyLoggingServerTargetName(), getMyNodeType());
+    // setup a QThread with us as parent that will house the OctreeServerDatagramProcessor
+    _datagramProcessingThread = new QThread(this);
+    
+    // create an OctreeServerDatagramProcessor and move it to that thread
+    OctreeServerDatagramProcessor* datagramProcessor = new OctreeServerDatagramProcessor(nodeList->getNodeSocket(), thread());
+    datagramProcessor->moveToThread(_datagramProcessingThread);
+    
+    // remove the NodeList as the parent of the node socket
+    nodeList->getNodeSocket().setParent(NULL);
+    nodeList->getNodeSocket().moveToThread(_datagramProcessingThread);
+    
+    // let the datagram processor handle readyRead from node socket
+    connect(&nodeList->getNodeSocket(), &QUdpSocket::readyRead,
+            datagramProcessor, &OctreeServerDatagramProcessor::readPendingDatagrams);
+    
+    // connect to the datagram processing thread signal that tells us we have to handle a packet
+    connect(datagramProcessor, &OctreeServerDatagramProcessor::packetRequiresProcessing, this, &OctreeServer::readPendingDatagram);
+    
+    // delete the datagram processor and the associated thread when the QThread quits
+    connect(_datagramProcessingThread, &QThread::finished, datagramProcessor, &QObject::deleteLater);
+    connect(datagramProcessor, &QObject::destroyed, _datagramProcessingThread, &QThread::deleteLater);
+    
+    // start the datagram processing thread
+    _datagramProcessingThread->start();
+}
 
-    // Now would be a good time to parse our arguments, if we got them as assignment
+bool OctreeServer::readOptionBool(const QString& optionName, const QJsonObject& settingsSectionObject, bool& result) {
+    result = false; // assume it doesn't exist
+    bool optionAvailable = false;
+    QString argName = "--" + optionName;
+    bool argExists = cmdOptionExists(_argc, _argv, qPrintable(argName));
+    if (argExists) {
+        optionAvailable = true;
+        result = argExists;
+        qDebug() << "From payload arguments: " << qPrintable(argName) << ":" << result;
+    } else if (settingsSectionObject.contains(optionName)) {
+        optionAvailable = true;
+        result = settingsSectionObject[optionName].toBool();
+        qDebug() << "From domain settings: " << qPrintable(optionName) << ":" << result;
+    }
+    return optionAvailable;
+}
+
+bool OctreeServer::readOptionInt(const QString& optionName, const QJsonObject& settingsSectionObject, int& result) {
+    bool optionAvailable = false;
+    QString argName = "--" + optionName;
+    const char* argValue = getCmdOption(_argc, _argv, qPrintable(argName));
+    if (argValue) {
+        optionAvailable = true;
+        result = atoi(argValue);
+        qDebug() << "From payload arguments: " << qPrintable(argName) << ":" << result;
+    } else if (settingsSectionObject.contains(optionName)) {
+        optionAvailable = true;
+        result = settingsSectionObject[optionName].toString().toInt(&optionAvailable);
+        if (optionAvailable) {
+            qDebug() << "From domain settings: " << qPrintable(optionName) << ":" << result;
+        }
+    }
+    return optionAvailable;
+}
+
+bool OctreeServer::readOptionString(const QString& optionName, const QJsonObject& settingsSectionObject, QString& result) {
+    bool optionAvailable = false;
+    QString argName = "--" + optionName;
+    const char* argValue = getCmdOption(_argc, _argv, qPrintable(argName));
+    if (argValue) {
+        optionAvailable = true;
+        result = QString(argValue);
+        qDebug() << "From payload arguments: " << qPrintable(argName) << ":" << qPrintable(result);
+    } else if (settingsSectionObject.contains(optionName)) {
+        optionAvailable = true;
+        result = settingsSectionObject[optionName].toString();
+        qDebug() << "From domain settings: " << qPrintable(optionName) << ":" << qPrintable(result);
+    }
+    return optionAvailable;
+}
+
+void OctreeServer::readConfiguration() {
+    // if the assignment had a payload, read and parse that
     if (getPayload().size() > 0) {
         parsePayload();
     }
 
-    beforeRun(); // after payload has been processed
-
-    qInstallMessageHandler(Logging::verboseMessageHandler);
-
-    const char* STATUS_PORT = "--statusPort";
-    const char* statusPort = getCmdOption(_argc, _argv, STATUS_PORT);
-    if (statusPort) {
-        _statusPort = atoi(statusPort);
-        initHTTPManager(_statusPort);
-    }
+    // wait until we have the domain-server settings, otherwise we bail
+    auto nodeList = DependencyManager::get<NodeList>();
+    DomainHandler& domainHandler = nodeList->getDomainHandler();
     
-    const char* STATUS_HOST = "--statusHost";
-    const char* statusHost = getCmdOption(_argc, _argv, STATUS_HOST);
-    if (statusHost) {
-        qDebug("--statusHost=%s", statusHost);
-        _statusHost = statusHost;
-    } else {
-        _statusHost = QHostAddress(getHostOrderLocalAddress()).toString();
+    qDebug() << "Waiting for domain settings from domain-server.";
+    
+    // block until we get the settingsRequestComplete signal
+    QEventLoop loop;
+    connect(&domainHandler, &DomainHandler::settingsReceived, &loop, &QEventLoop::quit);
+    connect(&domainHandler, &DomainHandler::settingsReceiveFail, &loop, &QEventLoop::quit);
+    domainHandler.requestDomainSettings();
+    loop.exec();
+    
+    if (domainHandler.getSettingsObject().isEmpty()) {
+        qDebug() << "No settings object from domain-server.";
+    }
+    const QJsonObject& settingsObject = domainHandler.getSettingsObject();
+    QString settingsKey = getMyDomainSettingsKey();
+    QJsonObject settingsSectionObject = settingsObject[settingsKey].toObject();
+    _settings = settingsSectionObject; // keep this for later
+    
+    if (!readOptionString(QString("statusHost"), settingsSectionObject, _statusHost) || _statusHost.isEmpty()) {
+        _statusHost = getLocalAddress().toString();
     }
     qDebug("statusHost=%s", qPrintable(_statusHost));
 
-
-    const char* JURISDICTION_FILE = "--jurisdictionFile";
-    const char* jurisdictionFile = getCmdOption(_argc, _argv, JURISDICTION_FILE);
-    if (jurisdictionFile) {
-        qDebug("jurisdictionFile=%s", jurisdictionFile);
-
-        qDebug("about to readFromFile().... jurisdictionFile=%s", jurisdictionFile);
-        _jurisdiction = new JurisdictionMap(jurisdictionFile);
-        qDebug("after readFromFile().... jurisdictionFile=%s", jurisdictionFile);
+    if (readOptionInt(QString("statusPort"), settingsSectionObject, _statusPort)) {
+        initHTTPManager(_statusPort);
+        qDebug() << "statusPort=" << _statusPort;
     } else {
-        const char* JURISDICTION_ROOT = "--jurisdictionRoot";
-        const char* jurisdictionRoot = getCmdOption(_argc, _argv, JURISDICTION_ROOT);
-        if (jurisdictionRoot) {
-            qDebug("jurisdictionRoot=%s", jurisdictionRoot);
-        }
+        qDebug() << "statusPort= DISABLED";
+    }
 
-        const char* JURISDICTION_ENDNODES = "--jurisdictionEndNodes";
-        const char* jurisdictionEndNodes = getCmdOption(_argc, _argv, JURISDICTION_ENDNODES);
-        if (jurisdictionEndNodes) {
-            qDebug("jurisdictionEndNodes=%s", jurisdictionEndNodes);
-        }
-
-        if (jurisdictionRoot || jurisdictionEndNodes) {
-            _jurisdiction = new JurisdictionMap(jurisdictionRoot, jurisdictionEndNodes);
+    QString jurisdictionFile;
+    if (readOptionString(QString("jurisdictionFile"), settingsSectionObject, jurisdictionFile)) {
+        qDebug("jurisdictionFile=%s", qPrintable(jurisdictionFile));
+        qDebug("about to readFromFile().... jurisdictionFile=%s", qPrintable(jurisdictionFile));
+        _jurisdiction = new JurisdictionMap(qPrintable(jurisdictionFile));
+        qDebug("after readFromFile().... jurisdictionFile=%s", qPrintable(jurisdictionFile));
+    } else {
+        QString jurisdictionRoot;
+        bool hasRoot = readOptionString(QString("jurisdictionRoot"), settingsSectionObject, jurisdictionRoot);
+        QString jurisdictionEndNodes;
+        bool hasEndNodes = readOptionString(QString("jurisdictionEndNodes"), settingsSectionObject, jurisdictionEndNodes);
+        
+        if (hasRoot || hasEndNodes) {
+            _jurisdiction = new JurisdictionMap(qPrintable(jurisdictionRoot), qPrintable(jurisdictionEndNodes));
         }
     }
 
-    NodeList* nodeList = NodeList::getInstance();
-    nodeList->setOwnerType(getMyNodeType());
+    readOptionBool(QString("verboseDebug"), settingsSectionObject, _verboseDebug);
+    qDebug("verboseDebug=%s", debug::valueOf(_verboseDebug));
 
-    connect(nodeList, SIGNAL(nodeAdded(SharedNodePointer)), SLOT(nodeAdded(SharedNodePointer)));
-    connect(nodeList, SIGNAL(nodeKilled(SharedNodePointer)),SLOT(nodeKilled(SharedNodePointer)));
+    readOptionBool(QString("debugSending"), settingsSectionObject, _debugSending);
+    qDebug("debugSending=%s", debug::valueOf(_debugSending));
+
+    readOptionBool(QString("debugReceiving"), settingsSectionObject, _debugReceiving);
+    qDebug("debugReceiving=%s", debug::valueOf(_debugReceiving));
+
+    readOptionBool(QString("debugTimestampNow"), settingsSectionObject, _debugTimestampNow);
+    qDebug() << "debugTimestampNow=" << _debugTimestampNow;
+
+    bool noPersist;
+    readOptionBool(QString("NoPersist"), settingsSectionObject, noPersist);
+    _wantPersist = !noPersist;
+    qDebug() << "wantPersist=" << _wantPersist;
+
+    if (_wantPersist) {
+        QString persistFilename;
+        if (!readOptionString(QString("persistFilename"), settingsSectionObject, persistFilename)) {
+            persistFilename = getMyDefaultPersistFilename();
+        }
+        strcpy(_persistFilename, qPrintable(persistFilename));
+        qDebug("persistFilename=%s", _persistFilename);
+
+        _persistInterval = OctreePersistThread::DEFAULT_PERSIST_INTERVAL;
+        readOptionInt(QString("persistInterval"), settingsSectionObject, _persistInterval);
+        qDebug() << "persistInterval=" << _persistInterval;
+
+        bool noBackup;
+        readOptionBool(QString("NoBackup"), settingsSectionObject, noBackup);
+        _wantBackup = !noBackup;
+        qDebug() << "wantBackup=" << _wantBackup;
+
+        //qDebug() << "settingsSectionObject:" << settingsSectionObject;
+        
+    } else {
+        qDebug("persistFilename= DISABLED");
+    }
+
+    // Debug option to demonstrate that the server's local time does not
+    // need to be in sync with any other network node. This forces clock
+    // skew for the individual server node
+    int clockSkew;
+    if (readOptionInt(QString("clockSkew"), settingsSectionObject, clockSkew)) {
+        usecTimestampNowForceClockSkew(clockSkew);
+        qDebug("clockSkew=%d", clockSkew);
+    }
+
+    // Check to see if the user passed in a command line option for setting packet send rate
+    int packetsPerSecondPerClientMax = -1;
+    if (readOptionInt(QString("packetsPerSecondPerClientMax"), settingsSectionObject, packetsPerSecondPerClientMax)) {
+        _packetsPerClientPerInterval = packetsPerSecondPerClientMax / INTERVALS_PER_SECOND;
+        if (_packetsPerClientPerInterval < 1) {
+            _packetsPerClientPerInterval = 1;
+        }
+    }
+    qDebug("packetsPerSecondPerClientMax=%d _packetsPerClientPerInterval=%d", 
+                    packetsPerSecondPerClientMax, _packetsPerClientPerInterval);
+
+    // Check to see if the user passed in a command line option for setting packet send rate
+    int packetsPerSecondTotalMax = -1;
+    if (readOptionInt(QString("packetsPerSecondTotalMax"), settingsSectionObject, packetsPerSecondTotalMax)) {
+        _packetsTotalPerInterval = packetsPerSecondTotalMax / INTERVALS_PER_SECOND;
+        if (_packetsTotalPerInterval < 1) {
+            _packetsTotalPerInterval = 1;
+        }
+    }
+    qDebug("packetsPerSecondTotalMax=%d _packetsTotalPerInterval=%d", 
+                    packetsPerSecondTotalMax, _packetsTotalPerInterval);
+                    
+                    
+    readAdditionalConfiguration(settingsSectionObject);
+}
+
+void OctreeServer::run() {
+    qInstallMessageHandler(LogHandler::verboseMessageHandler);
+
+    _safeServerName = getMyServerName();
+
+    // Before we do anything else, create our tree...
+    OctreeElement::resetPopulationStatistics();
+    _tree = createTree();
+    _tree->setIsServer(true);
+
+    // make sure our NodeList knows what type we are
+    auto nodeList = DependencyManager::get<NodeList>();
+    nodeList->setOwnerType(getMyNodeType());
+    
+    
+    // use common init to setup common timers and logging
+    commonInit(getMyLoggingServerTargetName(), getMyNodeType());
+
+    setupDatagramProcessingThread();
+
+    // read the configuration from either the payload or the domain server configuration
+    readConfiguration();
+        
+    beforeRun(); // after payload has been processed
+
+    connect(nodeList.data(), SIGNAL(nodeAdded(SharedNodePointer)), SLOT(nodeAdded(SharedNodePointer)));
+    connect(nodeList.data(), SIGNAL(nodeKilled(SharedNodePointer)),SLOT(nodeKilled(SharedNodePointer)));
 
 
     // we need to ask the DS about agents so we can ping/reply with them
     nodeList->addNodeTypeToInterestSet(NodeType::Agent);
-
+    
 #ifndef WIN32
     setvbuf(stdout, NULL, _IOLBF, 0);
 #endif
@@ -948,80 +1125,16 @@ void OctreeServer::run() {
 
     srand((unsigned)time(0));
 
-    const char* VERBOSE_DEBUG = "--verboseDebug";
-    _verboseDebug =  cmdOptionExists(_argc, _argv, VERBOSE_DEBUG);
-    qDebug("verboseDebug=%s", debug::valueOf(_verboseDebug));
-
-    const char* DEBUG_SENDING = "--debugSending";
-    _debugSending =  cmdOptionExists(_argc, _argv, DEBUG_SENDING);
-    qDebug("debugSending=%s", debug::valueOf(_debugSending));
-
-    const char* DEBUG_RECEIVING = "--debugReceiving";
-    _debugReceiving =  cmdOptionExists(_argc, _argv, DEBUG_RECEIVING);
-    qDebug("debugReceiving=%s", debug::valueOf(_debugReceiving));
-
-    // By default we will persist, if you want to disable this, then pass in this parameter
-    const char* NO_PERSIST = "--NoPersist";
-    if (cmdOptionExists(_argc, _argv, NO_PERSIST)) {
-        _wantPersist = false;
-    }
-    qDebug("wantPersist=%s", debug::valueOf(_wantPersist));
-
     // if we want Persistence, set up the local file and persist thread
     if (_wantPersist) {
 
-        // Check to see if the user passed in a command line option for setting packet send rate
-        const char* PERSIST_FILENAME = "--persistFilename";
-        const char* persistFilenameParameter = getCmdOption(_argc, _argv, PERSIST_FILENAME);
-        if (persistFilenameParameter) {
-            strcpy(_persistFilename, persistFilenameParameter);
-        } else {
-            strcpy(_persistFilename, getMyDefaultPersistFilename());
-        }
-
-        qDebug("persistFilename=%s", _persistFilename);
-
         // now set up PersistThread
-        _persistThread = new OctreePersistThread(_tree, _persistFilename);
+        _persistThread = new OctreePersistThread(_tree, _persistFilename, _persistInterval,
+                                    _wantBackup, _settings, _debugTimestampNow);
         if (_persistThread) {
             _persistThread->initialize(true);
         }
     }
-
-    // Debug option to demonstrate that the server's local time does not
-    // need to be in sync with any other network node. This forces clock
-    // skew for the individual server node
-    const char* CLOCK_SKEW = "--clockSkew";
-    const char* clockSkewOption = getCmdOption(_argc, _argv, CLOCK_SKEW);
-    if (clockSkewOption) {
-        int clockSkew = atoi(clockSkewOption);
-        usecTimestampNowForceClockSkew(clockSkew);
-        qDebug("clockSkewOption=%s clockSkew=%d", clockSkewOption, clockSkew);
-    }
-
-    // Check to see if the user passed in a command line option for setting packet send rate
-    const char* PACKETS_PER_SECOND_PER_CLIENT_MAX = "--packetsPerSecondPerClientMax";
-    const char* packetsPerSecondPerClientMax = getCmdOption(_argc, _argv, PACKETS_PER_SECOND_PER_CLIENT_MAX);
-    if (packetsPerSecondPerClientMax) {
-        _packetsPerClientPerInterval = atoi(packetsPerSecondPerClientMax) / INTERVALS_PER_SECOND;
-        if (_packetsPerClientPerInterval < 1) {
-            _packetsPerClientPerInterval = 1;
-        }
-    }
-    qDebug("packetsPerSecondPerClientMax=%s _packetsPerClientPerInterval=%d", 
-                    packetsPerSecondPerClientMax, _packetsPerClientPerInterval);
-
-    // Check to see if the user passed in a command line option for setting packet send rate
-    const char* PACKETS_PER_SECOND_TOTAL_MAX = "--packetsPerSecondTotalMax";
-    const char* packetsPerSecondTotalMax = getCmdOption(_argc, _argv, PACKETS_PER_SECOND_TOTAL_MAX);
-    if (packetsPerSecondTotalMax) {
-        _packetsTotalPerInterval = atoi(packetsPerSecondTotalMax) / INTERVALS_PER_SECOND;
-        if (_packetsTotalPerInterval < 1) {
-            _packetsTotalPerInterval = 1;
-        }
-    }
-    qDebug("packetsPerSecondTotalMax=%s _packetsTotalPerInterval=%d", 
-                    packetsPerSecondTotalMax, _packetsTotalPerInterval);
 
     HifiSockAddr senderSockAddr;
 
@@ -1098,10 +1211,16 @@ void OctreeServer::aboutToFinish() {
     qDebug() << qPrintable(_safeServerName) << "server STARTING about to finish...";
     qDebug() << qPrintable(_safeServerName) << "inform Octree Inbound Packet Processor that we are shutting down...";
     _octreeInboundPacketProcessor->shuttingDown();
-    foreach (const SharedNodePointer& node, NodeList::getInstance()->getNodeHash()) {
+    
+    DependencyManager::get<NodeList>()->eachNode([this](const SharedNodePointer& node) {
         qDebug() << qPrintable(_safeServerName) << "server about to finish while node still connected node:" << *node;
         forceNodeShutdown(node);
+    });
+    
+    if (_persistThread) {
+        _persistThread->aboutToFinish();
     }
+
     qDebug() << qPrintable(_safeServerName) << "server ENDING about to finish...";
 }
 
@@ -1258,7 +1377,7 @@ void OctreeServer::sendStatsPacket() {
     statsObject2[baseName + QString(".2.outbound.timing.5.avgSendTime")] = getAveragePacketSendingTime();
     statsObject2[baseName + QString(".2.outbound.timing.5.nodeWaitTime")] = getAverageNodeWaitTime();
 
-    NodeList::getInstance()->sendStatsToDomainServer(statsObject2);
+    DependencyManager::get<NodeList>()->sendStatsToDomainServer(statsObject2);
 
     static QJsonObject statsObject3;
 
@@ -1277,7 +1396,7 @@ void OctreeServer::sendStatsPacket() {
     statsObject3[baseName + QString(".3.inbound.timing.5.avgLockWaitTimePerElement")] = 
         (double)_octreeInboundPacketProcessor->getAverageLockWaitTimePerElement();
 
-    NodeList::getInstance()->sendStatsToDomainServer(statsObject3);
+    DependencyManager::get<NodeList>()->sendStatsToDomainServer(statsObject3);
 }
 
 QMap<OctreeSendThread*, quint64> OctreeServer::_threadsDidProcess;

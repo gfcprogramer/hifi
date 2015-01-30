@@ -8,18 +8,20 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
+#include <gpu/GPUConfig.h> // hack to get windows to build
+
 #include <QImage>
 
 #include <NodeList.h>
 
 #include <GeometryUtil.h>
+#include <ProgramObject.h>
 
 #include "Application.h"
 #include "Avatar.h"
 #include "Hand.h"
 #include "Menu.h"
 #include "Util.h"
-#include "renderer/ProgramObject.h"
 
 using namespace std;
 
@@ -68,7 +70,7 @@ void Hand::collideAgainstAvatar(Avatar* avatar, bool isMyHand) {
         skeletonModel.getHandShapes(jointIndex, shapes);
 
         if (avatar->findCollisions(shapes, handCollisions)) {
-            glm::vec3 totalPenetration(0.f);
+            glm::vec3 totalPenetration(0.0f);
             glm::vec3 averageContactPoint;
             for (int j = 0; j < handCollisions.size(); ++j) {
                 CollisionInfo* collision = handCollisions.getCollision(j);
@@ -113,8 +115,7 @@ void Hand::render(bool isMine, Model::RenderMode renderMode) {
             glm::vec3 position = palm.getPosition();
             glPushMatrix();
             glTranslatef(position.x, position.y, position.z);
-            glColor3f(0.0f, 1.0f, 0.0f);
-            glutSolidSphere(PALM_COLLISION_RADIUS * _owningAvatar->getScale(), 10, 10);
+            DependencyManager::get<GeometryCache>()->renderSphere(PALM_COLLISION_RADIUS * _owningAvatar->getScale(), 10, 10, glm::vec3(0.0f, 1.0f, 0.0f));
             glPopMatrix();
         }
     }
@@ -130,7 +131,6 @@ void Hand::render(bool isMine, Model::RenderMode renderMode) {
 void Hand::renderHandTargets(bool isMine) {
     glPushMatrix();
 
-    MyAvatar* myAvatar = Application::getInstance()->getAvatar();
     const float avatarScale = Application::getInstance()->getAvatar()->getScale();
 
     const float alpha = 1.0f;
@@ -150,8 +150,7 @@ void Hand::renderHandTargets(bool isMine) {
             glTranslatef(targetPosition.x, targetPosition.y, targetPosition.z);
         
             const float collisionRadius = 0.05f;
-            glColor4f(0.5f,0.5f,0.5f, alpha);
-            glutWireSphere(collisionRadius, 10.f, 10.f);
+            DependencyManager::get<GeometryCache>()->renderSphere(collisionRadius, 10, 10, glm::vec4(0.5f,0.5f,0.5f, alpha), false);
             glPopMatrix();
         }
     }
@@ -165,21 +164,17 @@ void Hand::renderHandTargets(bool isMine) {
     for (size_t i = 0; i < getNumPalms(); ++i) {
         PalmData& palm = getPalms()[i];
         if (palm.isActive()) {
-            glColor4f(handColor.r, handColor.g, handColor.b, alpha);
             glm::vec3 tip = palm.getTipPosition();
             glm::vec3 root = palm.getPosition();
 
-            //Scale the positions based on avatar scale
-            myAvatar->scaleVectorRelativeToPosition(tip);
-            myAvatar->scaleVectorRelativeToPosition(root);
+            Avatar::renderJointConnectingCone(root, tip, PALM_FINGER_ROD_RADIUS, PALM_FINGER_ROD_RADIUS, glm::vec4(handColor.r, handColor.g, handColor.b, alpha));
 
-            Avatar::renderJointConnectingCone(root, tip, PALM_FINGER_ROD_RADIUS, PALM_FINGER_ROD_RADIUS);
             //  Render sphere at palm/finger root
             glm::vec3 offsetFromPalm = root + palm.getNormal() * PALM_DISK_THICKNESS;
-            Avatar::renderJointConnectingCone(root, offsetFromPalm, PALM_DISK_RADIUS, 0.0f);
+            Avatar::renderJointConnectingCone(root, offsetFromPalm, PALM_DISK_RADIUS, 0.0f, glm::vec4(handColor.r, handColor.g, handColor.b, alpha));
             glPushMatrix();
             glTranslatef(root.x, root.y, root.z);
-            glutSolidSphere(PALM_BALL_RADIUS, 20.0f, 20.0f);
+            DependencyManager::get<GeometryCache>()->renderSphere(PALM_BALL_RADIUS, 20.0f, 20.0f, glm::vec4(handColor.r, handColor.g, handColor.b, alpha));
             glPopMatrix();
         }
     }

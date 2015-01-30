@@ -20,10 +20,10 @@ JurisdictionListener::JurisdictionListener(NodeType_t type) :
     _nodeType(type),
     _packetSender(JurisdictionListener::DEFAULT_PACKETS_PER_SECOND)
 {
-    connect(NodeList::getInstance(), &NodeList::nodeKilled, this, &JurisdictionListener::nodeKilled);
+    connect(DependencyManager::get<NodeList>().data(), &NodeList::nodeKilled, this, &JurisdictionListener::nodeKilled);
     
     // tell our NodeList we want to hear about nodes with our node type
-    NodeList::getInstance()->addNodeTypeToInterestSet(type);
+    DependencyManager::get<NodeList>()->addNodeTypeToInterestSet(type);
 }
 
 void JurisdictionListener::nodeKilled(SharedNodePointer node) {
@@ -35,17 +35,15 @@ void JurisdictionListener::nodeKilled(SharedNodePointer node) {
 bool JurisdictionListener::queueJurisdictionRequest() {
     static unsigned char buffer[MAX_PACKET_SIZE];
     unsigned char* bufferOut = &buffer[0];
-    ssize_t sizeOut = populatePacketHeader(reinterpret_cast<char*>(bufferOut), PacketTypeJurisdictionRequest);
+    int sizeOut = populatePacketHeader(reinterpret_cast<char*>(bufferOut), PacketTypeJurisdictionRequest);
     int nodeCount = 0;
 
-    NodeList* nodeList = NodeList::getInstance();
-    
-    foreach (const SharedNodePointer& node, nodeList->getNodeHash()) {
+    DependencyManager::get<NodeList>()->eachNode([&](const SharedNodePointer& node) {
         if (node->getType() == getNodeType() && node->getActiveSocket()) {
             _packetSender.queuePacketForSending(node, QByteArray(reinterpret_cast<char*>(bufferOut), sizeOut));
             nodeCount++;
         }
-    }
+    });
 
     if (nodeCount > 0){
         _packetSender.setPacketsPerSecond(nodeCount);

@@ -18,7 +18,8 @@
 #  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 # 
 
-set(FACESHIFT_SEARCH_DIRS "${FACESHIFT_ROOT_DIR}" "$ENV{FACESHIFT_ROOT_DIR}" "$ENV{HIFI_LIB_DIR}/faceshift")
+include("${MACRO_DIR}/HifiLibrarySearchHints.cmake")
+hifi_library_search_hints("faceshift")
 
 find_path(FACESHIFT_INCLUDE_DIRS fsbinarystream.h PATH_SUFFIXES include HINTS ${FACESHIFT_SEARCH_DIRS})
 
@@ -39,6 +40,6 @@ select_library_configurations(FACESHIFT)
 set(FACESHIFT_LIBRARIES ${FACESHIFT_LIBRARY})
 
 include(FindPackageHandleStandardArgs)
-find_package_handle_standard_args(FACESHIFT DEFAULT_MSG FACESHIFT_INCLUDE_DIRS FACESHIFT_LIBRARIES)
+find_package_handle_standard_args(Faceshift DEFAULT_MSG FACESHIFT_INCLUDE_DIRS FACESHIFT_LIBRARIES)
 
-mark_as_advanced(FACESHIFT_INCLUDE_DIRS FACESHIFT_LIBRARIES)
+mark_as_advanced(FACESHIFT_INCLUDE_DIRS FACESHIFT_LIBRARIES FACESHIFT_SEARCH_DIRS)

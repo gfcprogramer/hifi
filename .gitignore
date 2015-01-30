@@ -3,7 +3,7 @@ CMakeCache.txt
 CMakeFiles/
 CMakeScripts/
 cmake_install.cmake
-build/
+build*/
 Makefile
 *.user
 
@@ -31,6 +31,10 @@ DerivedData
 # ignore interface optional externals
 interface/external/*/*
 !interface/external/*/readme.txt
+
+# ignore interface optional resources
+interface/resources/visage/*
+!interface/resources/visage/tracker.cfg
 
 # Ignore interfaceCache for Linux users
 interface/interfaceCache/

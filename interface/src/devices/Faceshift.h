@@ -19,15 +19,19 @@
 #include <fsbinarystream.h>
 #endif
 
+#include <DependencyManager.h>
+
 #include "FaceTracker.h"
 
+const float DEFAULT_FACESHIFT_EYE_DEFLECTION = 0.25f;
+const QString DEFAULT_FACESHIFT_HOSTNAME = "localhost";
+
 /// Handles interaction with the Faceshift software, which provides head position/orientation and facial features.
-class Faceshift : public FaceTracker {
+class Faceshift : public FaceTracker, public Dependency {
     Q_OBJECT
+    SINGLETON_DEPENDENCY
 
 public:
-    Faceshift();
-
     void init();
 
     bool isConnectedOrConnecting() const; 
@@ -57,12 +61,24 @@ public:
     float getMouthSize() const { return getBlendshapeCoefficient(_jawOpenIndex); }
     float getMouthSmileLeft() const { return getBlendshapeCoefficient(_mouthSmileLeftIndex); }
     float getMouthSmileRight() const { return getBlendshapeCoefficient(_mouthSmileRightIndex); }
+    
+    float getEyeDeflection() const { return _eyeDeflection; }
+    void setEyeDeflection(float faceshiftEyeDeflection);
+    
+    const QString& getHostname() const { return _hostname; }
+    void setHostname(const QString& hostname);
 
     void update();
     void reset();
     
-    void updateFakeCoefficients(float leftBlink, float rightBlink, float browUp,
-        float jawOpen, QVector<float>& coefficients) const;
+    void updateFakeCoefficients(float leftBlink,
+                                float rightBlink,
+                                float browUp,
+                                float jawOpen,
+                                float mouth2,
+                                float mouth3,
+                                float mouth4,
+                                QVector<float>& coefficients) const;
     
 signals:
 
@@ -81,6 +97,8 @@ private slots:
     void readFromSocket();        
     
 private:
+    Faceshift();
+    virtual ~Faceshift() {}
     
     float getBlendshapeCoefficient(int index) const;
     
@@ -98,8 +116,12 @@ private:
     int _tcpRetryCount;
     bool _tracking;
     quint64 _lastTrackingStateReceived;
+    float _averageFrameTime;
     
     glm::vec3 _headAngularVelocity;
+    glm::vec3 _headLinearVelocity;
+    glm::vec3 _lastHeadTranslation;
+    glm::vec3 _filteredHeadTranslation;
     
     // degrees
     float _eyeGazeLeftPitch;
@@ -128,6 +150,9 @@ private:
     float _longTermAverageEyePitch;
     float _longTermAverageEyeYaw;
     bool _longTermAverageInitialized;
+    
+    float _eyeDeflection = DEFAULT_FACESHIFT_EYE_DEFLECTION;
+    QString _hostname = DEFAULT_FACESHIFT_HOSTNAME;
     
 };
 

@@ -15,7 +15,7 @@
 
 Endpoint::Endpoint(const SharedNodePointer& node, PacketRecord* baselineSendRecord, PacketRecord* baselineReceiveRecord) :
     _node(node),
-    _sequencer(byteArrayWithPopulatedHeader(PacketTypeMetavoxelData)) {
+    _sequencer(byteArrayWithPopulatedHeader(PacketTypeMetavoxelData), this) {
     
     connect(&_sequencer, SIGNAL(readyToWrite(const QByteArray&)), SLOT(sendDatagram(const QByteArray&)));
     connect(&_sequencer, SIGNAL(readyToRead(Bitstream&)), SLOT(readMessage(Bitstream&)));
@@ -49,12 +49,12 @@ void Endpoint::update() {
 
 int Endpoint::parseData(const QByteArray& packet) {
     // process through sequencer
-    _sequencer.receivedDatagram(packet);
+    QMetaObject::invokeMethod(&_sequencer, "receivedDatagram", Q_ARG(const QByteArray&, packet));
     return packet.size();
 }
 
 void Endpoint::sendDatagram(const QByteArray& data) {
-    NodeList::getInstance()->writeDatagram(data, _node);
+    DependencyManager::get<NodeList>()->writeDatagram(data, _node);
 }
 
 void Endpoint::readMessage(Bitstream& in) {
@@ -107,7 +107,8 @@ PacketRecord* Endpoint::maybeCreateReceiveRecord() const {
     return NULL;
 }
 
-PacketRecord::PacketRecord(const MetavoxelLOD& lod, const MetavoxelData& data) :
+PacketRecord::PacketRecord(int packetNumber, const MetavoxelLOD& lod, const MetavoxelData& data) :
+    _packetNumber(packetNumber),
     _lod(lod),
     _data(data) {
 }

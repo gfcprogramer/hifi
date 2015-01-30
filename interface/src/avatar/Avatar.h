@@ -19,10 +19,10 @@
 
 #include <AvatarData.h>
 
-#include "Hair.h"
 #include "Hand.h"
 #include "Head.h"
 #include "InterfaceConfig.h"
+#include "Recorder.h"
 #include "SkeletonModel.h"
 #include "world.h"
 
@@ -32,10 +32,6 @@ static const float RESCALING_TOLERANCE = .02f;
 
 extern const float CHAT_MESSAGE_SCALE;
 extern const float CHAT_MESSAGE_HEIGHT;
-
-const int HAIR_STRANDS = 150;           //  Number of strands of hair
-const int HAIR_LINKS = 10;              //  Number of links in a hair strand
-const int HAIR_MAX_CONSTRAINTS = 2;     //  Hair verlet is connected to at most how many others
 
 enum DriveKeys {
     FWD = 0,
@@ -68,6 +64,7 @@ class Texture;
 class Avatar : public AvatarData {
     Q_OBJECT
     Q_PROPERTY(quint32 collisionGroups READ getCollisionGroups WRITE setCollisionGroups)
+    Q_PROPERTY(glm::vec3 skeletonOffset READ getSkeletonOffset WRITE setSkeletonOffset)
 
 public:
     Avatar();
@@ -78,19 +75,19 @@ public:
     
     enum RenderMode { NORMAL_RENDER_MODE, SHADOW_RENDER_MODE, MIRROR_RENDER_MODE };
     
-    virtual void render(const glm::vec3& cameraPosition, RenderMode renderMode = NORMAL_RENDER_MODE);
+    virtual void render(const glm::vec3& cameraPosition, RenderMode renderMode = NORMAL_RENDER_MODE,
+        bool postLighting = false);
 
     //setters
     void setDisplayingLookatVectors(bool displayingLookatVectors) { getHead()->setRenderLookatVectors(displayingLookatVectors); }
-    void setMouseRay(const glm::vec3 &origin, const glm::vec3 &direction);
     void setIsLookAtTarget(const bool isLookAtTarget) { _isLookAtTarget = isLookAtTarget; }
+    bool getIsLookAtTarget() const { return _isLookAtTarget; }
     //getters
     bool isInitialized() const { return _initialized; }
     SkeletonModel& getSkeletonModel() { return _skeletonModel; }
     const QVector<Model*>& getAttachmentModels() const { return _attachmentModels; }
     glm::vec3 getChestPosition() const;
     float getScale() const { return _scale; }
-    const glm::vec3& getVelocity() const { return _velocity; }
     const Head* getHead() const { return static_cast<const Head*>(_headData); }
     Head* getHead() { return static_cast<Head*>(_headData); }
     Hand* getHand() { return static_cast<Hand*>(_handData); }
@@ -99,7 +96,7 @@ public:
     /// Returns the distance to use as a LOD parameter.
     float getLODDistance() const;
 
-    bool findRayIntersection(const glm::vec3& origin, const glm::vec3& direction, float& distance) const;
+    bool findRayIntersection(RayIntersectionInfo& intersection) const;
 
     /// \param shapes list of shapes to collide against avatar
     /// \param collisions list to store collision results
@@ -121,6 +118,7 @@ public:
 
     virtual bool isMyAvatar() { return false; }
     
+    virtual QVector<glm::quat> getJointRotations() const;
     virtual glm::quat getJointRotation(int index) const;
     virtual int getJointIndex(const QString& name) const;
     virtual QStringList getJointNames() const;
@@ -135,7 +133,8 @@ public:
     
     virtual int parseDataAtOffset(const QByteArray& packet, int offset);
 
-    static void renderJointConnectingCone(glm::vec3 position1, glm::vec3 position2, float radius1, float radius2);
+    static void renderJointConnectingCone(glm::vec3 position1, glm::vec3 position2, 
+                                                float radius1, float radius2, const glm::vec4& color);
 
     virtual void applyCollision(const glm::vec3& contactPoint, const glm::vec3& penetration) { }
 
@@ -144,21 +143,39 @@ public:
 
     quint32 getCollisionGroups() const { return _collisionGroups; }
     virtual void setCollisionGroups(quint32 collisionGroups) { _collisionGroups = (collisionGroups & VALID_COLLISION_GROUPS); }
+
+    Q_INVOKABLE void setSkeletonOffset(const glm::vec3& offset);
+    Q_INVOKABLE glm::vec3 getSkeletonOffset() { return _skeletonOffset; }
+    virtual glm::vec3 getSkeletonPosition() const;
     
     Q_INVOKABLE glm::vec3 getJointPosition(int index) const;
     Q_INVOKABLE glm::vec3 getJointPosition(const QString& name) const;
     Q_INVOKABLE glm::quat getJointCombinedRotation(int index) const;
     Q_INVOKABLE glm::quat getJointCombinedRotation(const QString& name) const;
     
-    glm::vec3 getAcceleration() const { return _acceleration; }
-    glm::vec3 getAngularVelocity() const { return _angularVelocity; }
-    glm::vec3 getAngularAcceleration() const { return _angularAcceleration; }
+    Q_INVOKABLE void setJointModelPositionAndOrientation(int index, const glm::vec3 position, const glm::quat& rotation);
+    Q_INVOKABLE void setJointModelPositionAndOrientation(const QString& name, const glm::vec3 position, 
+        const glm::quat& rotation);
+    
+    Q_INVOKABLE glm::vec3 getNeckPosition() const;
+
+    Q_INVOKABLE glm::vec3 getVelocity() const { return _velocity; }
+    Q_INVOKABLE glm::vec3 getAcceleration() const { return _acceleration; }
+    Q_INVOKABLE glm::vec3 getAngularVelocity() const { return _angularVelocity; }
+    Q_INVOKABLE glm::vec3 getAngularAcceleration() const { return _angularAcceleration; }
     
 
     /// Scales a world space position vector relative to the avatar position and scale
     /// \param vector position to be scaled. Will store the result
     void scaleVectorRelativeToPosition(glm::vec3 &positionToScale) const;
-    
+
+    void slamPosition(const glm::vec3& position);
+
+    // Call this when updating Avatar position with a delta.  This will allow us to 
+    // _accurately_ measure position changes and compute the resulting velocity 
+    // (otherwise floating point error will cause problems at large positions).
+    void applyPositionDelta(const glm::vec3& delta);
+
 public slots:
     void updateCollisionGroups();
     
@@ -166,22 +183,30 @@ signals:
     void collisionWithAvatar(const QUuid& myUUID, const QUuid& theirUUID, const CollisionInfo& collision);
 
 protected:
-    Hair _hair;
     SkeletonModel _skeletonModel;
+    glm::vec3 _skeletonOffset;
     QVector<Model*> _attachmentModels;
     float _bodyYawDelta;
+
     glm::vec3 _velocity;
+
+    // These position histories and derivatives are in the world-frame.
+    // The derivatives are the MEASURED results of all external and internal forces
+    // and are therefor READ-ONLY --> motion control of the Avatar is NOT obtained 
+    // by setting these values.
+    // Floating point error prevents us from accurately measuring velocity using a naive approach 
+    // (e.g. vel = (pos - lastPos)/dt) so instead we use _positionDeltaAccumulator.
+    glm::vec3 _positionDeltaAccumulator;
     glm::vec3 _lastVelocity;
     glm::vec3 _acceleration;
     glm::vec3 _angularVelocity;
     glm::vec3 _lastAngularVelocity;
     glm::vec3 _angularAcceleration;
     glm::quat _lastOrientation;
+
     float _leanScale;
     float _scale;
     glm::vec3 _worldUpDirection;
-    glm::vec3 _mouseRayOrigin;
-    glm::vec3 _mouseRayDirection;
     float _stringLength;
     bool _moving; ///< set when position is changing
     
@@ -193,23 +218,23 @@ protected:
     glm::vec3 getBodyFrontDirection() const { return getOrientation() * IDENTITY_FRONT; }
     glm::quat computeRotationFromBodyToWorldUp(float proportion = 1.0f) const;
     void setScale(float scale);
-    void updateAcceleration(float deltaTime);
+    void measureMotionDerivatives(float deltaTime);
 
     float getSkeletonHeight() const;
     float getHeadHeight() const;
     float getPelvisFloatingHeight() const;
-    float getPelvisToHeadLength() const;
     glm::vec3 getDisplayNamePosition();
 
+    float calculateDisplayNameScaleFactor(const glm::vec3& textPosition, bool inHMD);
     void renderDisplayName();
-    virtual void renderBody(RenderMode renderMode, float glowLevel = 0.0f);
+    virtual void renderBody(RenderMode renderMode, bool postLighting, float glowLevel = 0.0f);
     virtual bool shouldRenderHead(const glm::vec3& cameraPosition, RenderMode renderMode) const;
 
     void simulateAttachments(float deltaTime);
     virtual void renderAttachments(RenderMode renderMode);
 
     virtual void updateJointMappings();
-
+    
 private:
 
     bool _initialized;
@@ -221,7 +246,7 @@ private:
     
     float getBillboardSize() const;
     
-    
+    static int _jointConesID;
 };
 
 #endif // hifi_Avatar_h

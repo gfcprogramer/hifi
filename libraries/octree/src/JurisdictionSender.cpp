@@ -47,7 +47,7 @@ bool JurisdictionSender::process() {
         // add our packet to our own queue, then let the PacketSender class do the rest of the work.
         static unsigned char buffer[MAX_PACKET_SIZE];
         unsigned char* bufferOut = &buffer[0];
-        ssize_t sizeOut = 0;
+        int sizeOut = 0;
 
         if (_jurisdictionMap) {
             sizeOut = _jurisdictionMap->packIntoMessage(bufferOut, MAX_PACKET_SIZE);
@@ -61,7 +61,7 @@ bool JurisdictionSender::process() {
 
             QUuid nodeUUID = _nodesRequestingJurisdictions.front();
             _nodesRequestingJurisdictions.pop();
-            SharedNodePointer node = NodeList::getInstance()->nodeWithUUID(nodeUUID);
+            SharedNodePointer node = DependencyManager::get<NodeList>()->nodeWithUUID(nodeUUID);
 
             if (node && node->getActiveSocket()) {
                 _packetSender.queuePacketForSending(node, QByteArray(reinterpret_cast<char *>(bufferOut), sizeOut));

@@ -1,36 +1,11 @@
-cmake_minimum_required(VERSION 2.8)
-
-if (WIN32)
-  cmake_policy (SET CMP0020 NEW)
-endif (WIN32)
-
-set(ROOT_DIR ../..)
-set(MACRO_DIR "${ROOT_DIR}/cmake/macros")
-
-# setup for find modules
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/modules/")
-
 set(TARGET_NAME avatars)
 
-find_package(Qt5Script REQUIRED)
+# use setup_hifi_library macro to setup our project and link appropriate Qt modules
+setup_hifi_library(Network Script)
 
-include(${MACRO_DIR}/SetupHifiLibrary.cmake)
-setup_hifi_library(${TARGET_NAME})
+include_glm()
 
-include(${MACRO_DIR}/IncludeGLM.cmake)
-include_glm(${TARGET_NAME} "${ROOT_DIR}")
+link_hifi_libraries(audio shared octree networking gpu model fbx)
 
-include(${MACRO_DIR}/LinkHifiLibrary.cmake)
-link_hifi_library(shared ${TARGET_NAME} "${ROOT_DIR}")
-
-# link in the hifi voxels library
-link_hifi_library(octree ${TARGET_NAME} "${ROOT_DIR}")
-link_hifi_library(voxels ${TARGET_NAME} "${ROOT_DIR}")
-link_hifi_library(networking ${TARGET_NAME} "${ROOT_DIR}")
-
-target_link_libraries(${TARGET_NAME} Qt5::Script)
-
-# add a definition for ssize_t so that windows doesn't bail
-if (WIN32)
-  add_definitions(-Dssize_t=long)
-endif ()
+# call macro to include our dependency includes and bubble them up via a property on our target
+include_dependency_includes()

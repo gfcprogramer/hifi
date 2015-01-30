@@ -15,6 +15,8 @@
 
 #include <glm/glm.hpp>
 
+#include <GlowEffect.h>
+
 #include "Application.h"
 
 #include "TV3DManager.h"
@@ -25,6 +27,7 @@ int TV3DManager::_screenHeight = 1;
 double TV3DManager::_aspect = 1.0;
 eyeFrustum TV3DManager::_leftEye;
 eyeFrustum TV3DManager::_rightEye;
+eyeFrustum* TV3DManager::_activeEye = NULL;
 
 
 bool TV3DManager::isConnected() {
@@ -32,10 +35,10 @@ bool TV3DManager::isConnected() {
 }
 
 void TV3DManager::connect() {
-    Application* app = Application::getInstance();
-    int width = app->getGLWidget()->width();
-    int height = app->getGLWidget()->height();
-    Camera& camera = *app->getCamera();
+    auto glCanvas = DependencyManager::get<GLCanvas>();
+    int width = glCanvas->getDeviceWidth();
+    int height = glCanvas->getDeviceHeight();
+    Camera& camera = *Application::getInstance()->getCamera();
 
     configureCamera(camera, width, height);
 }
@@ -90,10 +93,11 @@ void TV3DManager::display(Camera& whichCamera) {
     // left eye portal
     int portalX = 0;
     int portalY = 0;
-    int portalW = Application::getInstance()->getGLWidget()->width() / 2;
-    int portalH = Application::getInstance()->getGLWidget()->height();
-
-    const bool glowEnabled = Menu::getInstance()->isOptionChecked(MenuOption::EnableGlowEffect);
+    auto glCanvas = DependencyManager::get<GLCanvas>();
+    QSize deviceSize = glCanvas->getDeviceSize() *
+        Application::getInstance()->getRenderResolutionScale();
+    int portalW = deviceSize.width() / 2;
+    int portalH = deviceSize.height();
 
     ApplicationOverlay& applicationOverlay = Application::getInstance()->getApplicationOverlay();
 
@@ -102,9 +106,7 @@ void TV3DManager::display(Camera& whichCamera) {
     applicationOverlay.renderOverlay(true);
     const bool displayOverlays = Menu::getInstance()->isOptionChecked(MenuOption::UserInterface);
 
-    if (glowEnabled) {
-        Application::getInstance()->getGlowEffect()->prepare();
-    }
+    DependencyManager::get<GlowEffect>()->prepare();
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -115,7 +117,7 @@ void TV3DManager::display(Camera& whichCamera) {
 
     glPushMatrix();
     {
-        
+        _activeEye = &_leftEye;
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity(); // reset projection matrix
         glFrustum(_leftEye.left, _leftEye.right, _leftEye.bottom, _leftEye.top, nearZ, farZ); // set left view frustum
@@ -127,23 +129,25 @@ void TV3DManager::display(Camera& whichCamera) {
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
-        Application::getInstance()->displaySide(whichCamera);
+        Application::getInstance()->displaySide(whichCamera, false, RenderArgs::STEREO_LEFT);
 
         if (displayOverlays) {
             applicationOverlay.displayOverlayTexture3DTV(whichCamera, _aspect, fov);
         }
+        _activeEye = NULL;
     }
     glPopMatrix();
     glDisable(GL_SCISSOR_TEST);
 
     // render right side view
-    portalX = Application::getInstance()->getGLWidget()->width() / 2;
+    portalX = deviceSize.width() / 2;
     glEnable(GL_SCISSOR_TEST);
     // render left side view
     glViewport(portalX, portalY, portalW, portalH);
     glScissor(portalX, portalY, portalW, portalH);
     glPushMatrix();
     {
+        _activeEye = &_rightEye;
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity(); // reset projection matrix
         glFrustum(_rightEye.left, _rightEye.right, _rightEye.bottom, _rightEye.top, nearZ, farZ); // set left view frustum
@@ -155,19 +159,28 @@ void TV3DManager::display(Camera& whichCamera) {
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
-        Application::getInstance()->displaySide(whichCamera);
+        Application::getInstance()->displaySide(whichCamera, false, RenderArgs::STEREO_RIGHT);
 
         if (displayOverlays) {
             applicationOverlay.displayOverlayTexture3DTV(whichCamera, _aspect, fov);
         }
+        _activeEye = NULL;
     }
     glPopMatrix();
     glDisable(GL_SCISSOR_TEST);
 
     // reset the viewport to how we started
-    glViewport(0, 0, Application::getInstance()->getGLWidget()->width(), Application::getInstance()->getGLWidget()->height());
+    glViewport(0, 0, deviceSize.width(), deviceSize.height());
 
-    if (glowEnabled) {
-        Application::getInstance()->getGlowEffect()->render();
+    DependencyManager::get<GlowEffect>()->render();
+}
+
+void TV3DManager::overrideOffAxisFrustum(float& left, float& right, float& bottom, float& top, float& nearVal,
+        float& farVal, glm::vec4& nearClipPlane, glm::vec4& farClipPlane) {
+    if (_activeEye) {
+        left = _activeEye->left;
+        right = _activeEye->right;
+        bottom = _activeEye->bottom;
+        top = _activeEye->top;
     }
 }

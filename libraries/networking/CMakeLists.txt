@@ -1,27 +1,32 @@
-cmake_minimum_required(VERSION 2.8)
-
-if (WIN32)
-  cmake_policy (SET CMP0020 NEW)
-endif (WIN32)
-
-set(ROOT_DIR ../..)
-set(MACRO_DIR "${ROOT_DIR}/cmake/macros")
-
 set(TARGET_NAME networking)
-project(${TARGET_NAME})
 
-find_package(Qt5 COMPONENTS Network)
+# use setup_hifi_library macro to setup our project and link appropriate Qt modules
+setup_hifi_library(Network)
 
-include(${MACRO_DIR}/SetupHifiLibrary.cmake)
-setup_hifi_library(${TARGET_NAME})
+link_hifi_libraries(shared)
 
-# include GLM
-include(${MACRO_DIR}/IncludeGLM.cmake)
-include_glm(${TARGET_NAME} "${ROOT_DIR}")
-
-target_link_libraries(${TARGET_NAME} Qt5::Network)
-
-# add a definition for ssize_t so that windows doesn't bail
 if (WIN32)
-  add_definitions(-Dssize_t=long)
+  # we need ws2_32.lib on windows, but it's static so we don't bubble it up
+  target_link_libraries(${TARGET_NAME} ws2_32.lib)
 endif ()
+
+# find required dependencies
+find_package(OpenSSL REQUIRED)
+find_package(TBB REQUIRED)
+
+if (APPLE AND ${OPENSSL_INCLUDE_DIR} STREQUAL "/usr/include")
+  # this is a user on OS X using system OpenSSL, which is going to throw warnings since they're deprecating for their common crypto
+  message(WARNING "The found version of OpenSSL is the OS X system version. This will produce deprecation warnings."
+   "\nWe recommend you install a newer version (at least 1.0.1h) in a different directory and set OPENSSL_ROOT_DIR in your env so Cmake can find it.")
+endif ()
+
+include_directories(SYSTEM "${OPENSSL_INCLUDE_DIR}")
+
+# append OpenSSL to our list of libraries to link
+target_link_libraries(${TARGET_NAME} ${OPENSSL_LIBRARIES} ${TBB_LIBRARIES})
+
+# append libcuckoo includes to our list of includes to bubble
+list(APPEND ${TARGET_NAME}_DEPENDENCY_INCLUDES "${TBB_INCLUDE_DIRS}")
+
+# call macro to include our dependency includes and bubble them up via a property on our target
+include_dependency_includes()

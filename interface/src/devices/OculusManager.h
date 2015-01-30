@@ -15,15 +15,13 @@
 
 #ifdef HAVE_LIBOVR
 #include <OVR.h>
-#include <Util_Render_Stereo.h>
 #endif
 
-#include "renderer/ProgramObject.h"
-
-const float DEFAULT_OCULUS_UI_ANGULAR_SIZE = 72.0f;
+#include <ProgramObject.h>
 
 class Camera;
 class PalmData;
+class Text3DOverlay;
 
 /// Handles interaction with the Oculus Rift.
 class OculusManager {
@@ -31,6 +29,8 @@ public:
     static void connect();
     static void disconnect();
     static bool isConnected();
+    static void recalibrate();
+    static void abandonCalibration();
     static void beginFrameTiming();
     static void endFrameTiming();
     static void configureCamera(Camera& camera, int screenWidth, int screenHeight);
@@ -41,12 +41,23 @@ public:
     /// param \pitch[out] pitch in radians
     /// param \roll[out] roll in radians
     static void getEulerAngles(float& yaw, float& pitch, float& roll);
+    static glm::vec3 getRelativePosition();
     static QSize getRenderTargetSize();
+    
+    static void overrideOffAxisFrustum(float& left, float& right, float& bottom, float& top, float& nearVal,
+        float& farVal, glm::vec4& nearClipPlane, glm::vec4& farClipPlane);
+    
+    static glm::vec3 getLeftEyePosition() { return _leftEyePosition; }
+    static glm::vec3 getRightEyePosition() { return _rightEyePosition; }
+    
+    static int getHMDScreen();
     
 private:
 #ifdef HAVE_LIBOVR
     static void generateDistortionMesh();
     static void renderDistortionMesh(ovrPosef eyeRenderPose[ovrEye_Count]);
+
+    static bool similarNames(const QString& nameA,const QString& nameB);
 
     struct DistortionVertex {
         glm::vec2 pos;
@@ -92,7 +103,35 @@ private:
     static bool _frameTimingActive;
     static bool _programInitialized;
     static Camera* _camera;
+    static int _activeEyeIndex;
+
+    static void calibrate(const glm::vec3 position, const glm::quat orientation);
+    enum CalibrationState {
+        UNCALIBRATED,
+        WAITING_FOR_DELTA,
+        WAITING_FOR_ZERO,
+        WAITING_FOR_ZERO_HELD,
+        CALIBRATED
+    };
+    static void positionCalibrationBillboard(Text3DOverlay* message);
+    static float CALIBRATION_DELTA_MINIMUM_LENGTH;
+    static float CALIBRATION_DELTA_MINIMUM_ANGLE;
+    static float CALIBRATION_ZERO_MAXIMUM_LENGTH;
+    static float CALIBRATION_ZERO_MAXIMUM_ANGLE;
+    static quint64 CALIBRATION_ZERO_HOLD_TIME;
+    static float CALIBRATION_MESSAGE_DISTANCE;
+    static CalibrationState _calibrationState;
+    static glm::vec3 _calibrationPosition;
+    static glm::quat _calibrationOrientation;
+    static quint64 _calibrationStartTime;
+    static int _calibrationMessage;
+
 #endif
+    
+    static glm::vec3 _leftEyePosition;
+    static glm::vec3 _rightEyePosition;
+    
+
 };
 
 #endif // hifi_OculusManager_h

@@ -9,6 +9,7 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
+#include <QBuffer>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDebug>
@@ -21,6 +22,7 @@
 #include <QHBoxLayout>
 #include <QHttpMultiPart>
 #include <QImage>
+#include <QJsonDocument>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QProgressBar>
@@ -28,12 +30,17 @@
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QTextStream>
+#include <QThread>
 #include <QVBoxLayout>
 #include <QVariant>
 
 #include <AccountManager.h>
+#include <GeometryCache.h>
+#include <GLMHelpers.h>
+#include <ResourceCache.h>
+#include <Settings.h>
+#include <TextureCache.h>
 
-#include "Application.h"
 #include "ModelUploader.h"
 
 
@@ -48,19 +55,49 @@ static const QString TRANSLATION_Y_FIELD = "ty";
 static const QString TRANSLATION_Z_FIELD = "tz";
 static const QString JOINT_FIELD = "joint";
 static const QString FREE_JOINT_FIELD = "freeJoint";
+static const QString BLENDSHAPE_FIELD = "bs";
 
 static const QString S3_URL = "http://public.highfidelity.io";
 static const QString MODEL_URL = "/api/v1/models";
 
-static const QString SETTING_NAME = "LastModelUploadLocation";
-
-static const int MAX_SIZE = 10 * 1024 * 1024; // 10 MB
+static const unsigned long long MAX_SIZE = 50 * 1024 * BYTES_PER_MEGABYTES; // 50 GB (Virtually remove limit)
 static const int MAX_TEXTURE_SIZE = 1024;
 static const int TIMEOUT = 1000;
 static const int MAX_CHECK = 30;
 
 static const int QCOMPRESS_HEADER_POSITION = 0;
 static const int QCOMPRESS_HEADER_SIZE = 4;
+
+namespace SettingHandles {
+    const SettingHandle<QString> lastModelUploadLocation("LastModelUploadLocation",
+                        QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
+}
+
+void ModelUploader::uploadModel(ModelType modelType) {
+    ModelUploader* uploader = new ModelUploader(modelType);
+    QThread* thread = new QThread();
+    thread->connect(uploader, SIGNAL(destroyed()), SLOT(quit()));
+    thread->connect(thread, SIGNAL(finished()), SLOT(deleteLater()));
+    uploader->connect(thread, SIGNAL(started()), SLOT(send()));
+    
+    thread->start();
+}
+
+void ModelUploader::uploadHead() {
+    uploadModel(HEAD_MODEL);
+}
+
+void ModelUploader::uploadSkeleton() {
+    uploadModel(SKELETON_MODEL);
+}
+
+void ModelUploader::uploadAttachment() {
+    uploadModel(ATTACHMENT_MODEL);
+}
+
+void ModelUploader::uploadEntity() {
+    uploadModel(ENTITY_MODEL);
+}
 
 ModelUploader::ModelUploader(ModelType modelType) :
     _lodCount(-1),
@@ -80,8 +117,7 @@ ModelUploader::~ModelUploader() {
 
 bool ModelUploader::zip() {
     // File Dialog
-    QSettings* settings = Application::getInstance()->lockSettings();
-    QString lastLocation = settings->value(SETTING_NAME).toString();
+    QString lastLocation = SettingHandles::lastModelUploadLocation.get();
     
     if (lastLocation.isEmpty()) {
        lastLocation  = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
@@ -96,11 +132,9 @@ bool ModelUploader::zip() {
         lastLocation, "Model files (*.fst *.fbx)");
     if (filename == "") {
         // If the user canceled we return.
-        Application::getInstance()->unlockSettings();
         return false;
     }
-    settings->setValue(SETTING_NAME, filename);
-    Application::getInstance()->unlockSettings();
+    SettingHandles::lastModelUploadLocation.set(filename);
     
     // First we check the FST file (if any)
     QFile* fst;
@@ -147,50 +181,7 @@ bool ModelUploader::zip() {
     FBXGeometry geometry = readFBX(fbxContents, QVariantHash());
     
     // make sure we have some basic mappings
-    if (!mapping.contains(NAME_FIELD)) {
-        mapping.insert(NAME_FIELD, QFileInfo(filename).baseName());
-    }
-    if (!mapping.contains(TEXDIR_FIELD)) {
-        mapping.insert(TEXDIR_FIELD, ".");
-    }
-    
-    // mixamo/autodesk defaults
-    if (!mapping.contains(SCALE_FIELD)) {
-        mapping.insert(SCALE_FIELD, geometry.author == "www.makehuman.org" ? 150.0 : 15.0);
-    }
-    QVariantHash joints = mapping.value(JOINT_FIELD).toHash();
-    if (!joints.contains("jointEyeLeft")) {
-        joints.insert("jointEyeLeft", geometry.jointIndices.contains("EyeLeft") ? "EyeLeft" : "LeftEye");
-    }
-    if (!joints.contains("jointEyeRight")) {
-        joints.insert("jointEyeRight", geometry.jointIndices.contains("EyeRight") ? "EyeRight" : "RightEye");
-    }
-    if (!joints.contains("jointNeck")) {
-        joints.insert("jointNeck", "Neck");
-    }
-    if (!joints.contains("jointRoot")) {
-        joints.insert("jointRoot", "Hips");
-    }
-    if (!joints.contains("jointLean")) {
-        joints.insert("jointLean", "Spine");
-    }
-    if (!joints.contains("jointHead")) {
-        const char* topName = (geometry.applicationName == "mixamo.com") ? "HeadTop_End" : "HeadEnd";
-        joints.insert("jointHead", geometry.jointIndices.contains(topName) ? topName : "Head");
-    }
-    if (!joints.contains("jointLeftHand")) {
-        joints.insert("jointLeftHand", "LeftHand");
-    }
-    if (!joints.contains("jointRightHand")) {
-        joints.insert("jointRightHand", "RightHand");
-    }
-    mapping.insert(JOINT_FIELD, joints);
-    if (!mapping.contains(FREE_JOINT_FIELD)) {
-        mapping.insertMulti(FREE_JOINT_FIELD, "LeftArm");
-        mapping.insertMulti(FREE_JOINT_FIELD, "LeftForeArm");
-        mapping.insertMulti(FREE_JOINT_FIELD, "RightArm");
-        mapping.insertMulti(FREE_JOINT_FIELD, "RightForeArm");
-    }
+    populateBasicMapping(mapping, filename, geometry);
     
     // open the dialog to configure the rest
     ModelPropertiesDialog properties(_modelType, mapping, basePath, geometry);
@@ -274,6 +265,111 @@ bool ModelUploader::zip() {
     return true;
 }
 
+void ModelUploader::populateBasicMapping(QVariantHash& mapping, QString filename, FBXGeometry geometry) {
+    if (!mapping.contains(NAME_FIELD)) {
+        mapping.insert(NAME_FIELD, QFileInfo(filename).baseName());
+    }
+    if (!mapping.contains(TEXDIR_FIELD)) {
+        mapping.insert(TEXDIR_FIELD, ".");
+    }
+    
+    // mixamo/autodesk defaults
+    if (!mapping.contains(SCALE_FIELD)) {
+        mapping.insert(SCALE_FIELD, 1.0);
+    }
+    QVariantHash joints = mapping.value(JOINT_FIELD).toHash();
+    if (!joints.contains("jointEyeLeft")) {
+        joints.insert("jointEyeLeft", geometry.jointIndices.contains("jointEyeLeft") ? "jointEyeLeft" :
+                      (geometry.jointIndices.contains("EyeLeft") ? "EyeLeft" : "LeftEye"));
+    }
+    if (!joints.contains("jointEyeRight")) {
+        joints.insert("jointEyeRight", geometry.jointIndices.contains("jointEyeRight") ? "jointEyeRight" :
+                      geometry.jointIndices.contains("EyeRight") ? "EyeRight" : "RightEye");
+    }
+    if (!joints.contains("jointNeck")) {
+        joints.insert("jointNeck", geometry.jointIndices.contains("jointNeck") ? "jointNeck" : "Neck");
+    }
+    if (!joints.contains("jointRoot")) {
+        joints.insert("jointRoot", "Hips");
+    }
+    if (!joints.contains("jointLean")) {
+        joints.insert("jointLean", "Spine");
+    }
+    if (!joints.contains("jointHead")) {
+        const char* topName = (geometry.applicationName == "mixamo.com") ? "HeadTop_End" : "HeadEnd";
+        joints.insert("jointHead", geometry.jointIndices.contains(topName) ? topName : "Head");
+    }
+    if (!joints.contains("jointLeftHand")) {
+        joints.insert("jointLeftHand", "LeftHand");
+    }
+    if (!joints.contains("jointRightHand")) {
+        joints.insert("jointRightHand", "RightHand");
+    }
+    mapping.insert(JOINT_FIELD, joints);
+    if (!mapping.contains(FREE_JOINT_FIELD)) {
+        mapping.insertMulti(FREE_JOINT_FIELD, "LeftArm");
+        mapping.insertMulti(FREE_JOINT_FIELD, "LeftForeArm");
+        mapping.insertMulti(FREE_JOINT_FIELD, "RightArm");
+        mapping.insertMulti(FREE_JOINT_FIELD, "RightForeArm");
+    }
+    
+    // mixamo blendshapes
+    if (!mapping.contains(BLENDSHAPE_FIELD) && geometry.applicationName == "mixamo.com") {
+        QVariantHash blendshapes;
+        blendshapes.insertMulti("BrowsD_L", QVariantList() << "BrowsDown_Left" << 1.0);
+        blendshapes.insertMulti("BrowsD_R", QVariantList() << "BrowsDown_Right" << 1.0);
+        blendshapes.insertMulti("BrowsU_C", QVariantList() << "BrowsUp_Left" << 1.0);
+        blendshapes.insertMulti("BrowsU_C", QVariantList() << "BrowsUp_Right" << 1.0);
+        blendshapes.insertMulti("BrowsU_L", QVariantList() << "BrowsUp_Left" << 1.0);
+        blendshapes.insertMulti("BrowsU_R", QVariantList() << "BrowsUp_Right" << 1.0);
+        blendshapes.insertMulti("ChinLowerRaise", QVariantList() << "Jaw_Up" << 1.0);
+        blendshapes.insertMulti("ChinUpperRaise", QVariantList() << "UpperLipUp_Left" << 0.5);
+        blendshapes.insertMulti("ChinUpperRaise", QVariantList() << "UpperLipUp_Right" << 0.5);
+        blendshapes.insertMulti("EyeBlink_L", QVariantList() << "Blink_Left" << 1.0);
+        blendshapes.insertMulti("EyeBlink_R", QVariantList() << "Blink_Right" << 1.0);
+        blendshapes.insertMulti("EyeOpen_L", QVariantList() << "EyesWide_Left" << 1.0);
+        blendshapes.insertMulti("EyeOpen_R", QVariantList() << "EyesWide_Right" << 1.0);
+        blendshapes.insertMulti("EyeSquint_L", QVariantList() << "Squint_Left" << 1.0);
+        blendshapes.insertMulti("EyeSquint_R", QVariantList() << "Squint_Right" << 1.0);
+        blendshapes.insertMulti("JawFwd", QVariantList() << "JawForeward" << 1.0);
+        blendshapes.insertMulti("JawLeft", QVariantList() << "JawRotateY_Left" << 0.5);
+        blendshapes.insertMulti("JawOpen", QVariantList() << "MouthOpen" << 0.7);
+        blendshapes.insertMulti("JawRight", QVariantList() << "Jaw_Right" << 1.0);
+        blendshapes.insertMulti("LipsFunnel", QVariantList() << "JawForeward" << 0.39);
+        blendshapes.insertMulti("LipsFunnel", QVariantList() << "Jaw_Down" << 0.36);
+        blendshapes.insertMulti("LipsFunnel", QVariantList() << "MouthNarrow_Left" << 1.0);
+        blendshapes.insertMulti("LipsFunnel", QVariantList() << "MouthNarrow_Right" << 1.0);
+        blendshapes.insertMulti("LipsFunnel", QVariantList() << "MouthWhistle_NarrowAdjust_Left" << 0.5);
+        blendshapes.insertMulti("LipsFunnel", QVariantList() << "MouthWhistle_NarrowAdjust_Right" << 0.5);
+        blendshapes.insertMulti("LipsFunnel", QVariantList() << "TongueUp" << 1.0);
+        blendshapes.insertMulti("LipsLowerClose", QVariantList() << "LowerLipIn" << 1.0);
+        blendshapes.insertMulti("LipsLowerDown", QVariantList() << "LowerLipDown_Left" << 0.7);
+        blendshapes.insertMulti("LipsLowerDown", QVariantList() << "LowerLipDown_Right" << 0.7);
+        blendshapes.insertMulti("LipsLowerOpen", QVariantList() << "LowerLipOut" << 1.0);
+        blendshapes.insertMulti("LipsPucker", QVariantList() << "MouthNarrow_Left" << 1.0);
+        blendshapes.insertMulti("LipsPucker", QVariantList() << "MouthNarrow_Right" << 1.0);
+        blendshapes.insertMulti("LipsUpperClose", QVariantList() << "UpperLipIn" << 1.0);
+        blendshapes.insertMulti("LipsUpperOpen", QVariantList() << "UpperLipOut" << 1.0);
+        blendshapes.insertMulti("LipsUpperUp", QVariantList() << "UpperLipUp_Left" << 0.7);
+        blendshapes.insertMulti("LipsUpperUp", QVariantList() << "UpperLipUp_Right" << 0.7);
+        blendshapes.insertMulti("MouthDimple_L", QVariantList() << "Smile_Left" << 0.25);
+        blendshapes.insertMulti("MouthDimple_R", QVariantList() << "Smile_Right" << 0.25);
+        blendshapes.insertMulti("MouthFrown_L", QVariantList() << "Frown_Left" << 1.0);
+        blendshapes.insertMulti("MouthFrown_R", QVariantList() << "Frown_Right" << 1.0);
+        blendshapes.insertMulti("MouthLeft", QVariantList() << "Midmouth_Left" << 1.0);
+        blendshapes.insertMulti("MouthRight", QVariantList() << "Midmouth_Right" << 1.0);
+        blendshapes.insertMulti("MouthSmile_L", QVariantList() << "Smile_Left" << 1.0);
+        blendshapes.insertMulti("MouthSmile_R", QVariantList() << "Smile_Right" << 1.0);
+        blendshapes.insertMulti("Puff", QVariantList() << "CheekPuff_Left" << 1.0);
+        blendshapes.insertMulti("Puff", QVariantList() << "CheekPuff_Right" << 1.0);
+        blendshapes.insertMulti("Sneer", QVariantList() << "NoseScrunch_Left" << 0.75);
+        blendshapes.insertMulti("Sneer", QVariantList() << "NoseScrunch_Right" << 0.75);
+        blendshapes.insertMulti("Sneer", QVariantList() << "Squint_Left" << 0.5);
+        blendshapes.insertMulti("Sneer", QVariantList() << "Squint_Right" << 0.5);
+        mapping.insert(BLENDSHAPE_FIELD, blendshapes);
+    }
+}
+
 void ModelUploader::send() {
     if (!zip()) {
         deleteLater();
@@ -307,7 +403,9 @@ void ModelUploader::send() {
     _progressBar = NULL;
 }
 
-void ModelUploader::checkJSON(const QJsonObject& jsonResponse) {
+void ModelUploader::checkJSON(QNetworkReply& requestReply) {
+    QJsonObject jsonResponse = QJsonDocument::fromJson(requestReply.readAll()).object();
+    
     if (jsonResponse.contains("status") && jsonResponse.value("status").toString() == "success") {
         qDebug() << "status : success";
         JSONCallbackParameters callbackParams;
@@ -369,7 +467,7 @@ void ModelUploader::uploadUpdate(qint64 bytesSent, qint64 bytesTotal) {
     }
 }
 
-void ModelUploader::uploadSuccess(const QJsonObject& jsonResponse) {
+void ModelUploader::uploadSuccess(QNetworkReply& requestReply) {
     if (_progressDialog) {
         _progressDialog->accept();
     }
@@ -381,11 +479,11 @@ void ModelUploader::uploadSuccess(const QJsonObject& jsonResponse) {
     checkS3();
 }
 
-void ModelUploader::uploadFailed(QNetworkReply::NetworkError errorCode, const QString& errorString) {
+void ModelUploader::uploadFailed(QNetworkReply& errorReply) {
     if (_progressDialog) {
         _progressDialog->reject();
     }
-    qDebug() << "Model upload failed (" << errorCode << "): " << errorString;
+    qDebug() << "Model upload failed (" << errorReply.error() << "): " << errorReply.errorString();
     QMessageBox::warning(NULL,
                          QString("ModelUploader::uploadFailed()"),
                          QString("There was a problem with your upload, please try again later."),
@@ -405,17 +503,19 @@ void ModelUploader::processCheck() {
     _timer.stop();
     
     switch (reply->error()) {
-        case QNetworkReply::NoError:
+        case QNetworkReply::NoError: {
             QMessageBox::information(NULL,
                                      QString("ModelUploader::processCheck()"),
                                      QString("Your model is now available in the browser."),
                                      QMessageBox::Ok);
-            Application::getInstance()->getGeometryCache()->refresh(_url);
+            DependencyManager::get<GeometryCache>()->refresh(_url);
+            auto textureCache = DependencyManager::get<TextureCache>();
             foreach (const QByteArray& filename, _textureFilenames) {
-                Application::getInstance()->getTextureCache()->refresh(_textureBase + filename);
+                textureCache->refresh(_textureBase + filename);
             }
             deleteLater();
             break;
+        }
         case QNetworkReply::ContentNotFoundError:
             if (--_numberOfChecks) {
                 _timer.start(TIMEOUT);
@@ -460,6 +560,14 @@ bool ModelUploader::addTextures(const QString& texdir, const FBXGeometry& geomet
                     return false;
                 }
                 _textureFilenames.insert(part.specularTexture.filename);
+            }
+            if (!part.emissiveTexture.filename.isEmpty() && part.emissiveTexture.content.isEmpty() &&
+                    !_textureFilenames.contains(part.emissiveTexture.filename)) {
+                if (!addPart(texdir + "/" + part.emissiveTexture.filename,
+                             QString("texture%1").arg(++_texturesCount), true)) {
+                    return false;
+                }
+                _textureFilenames.insert(part.emissiveTexture.filename);
             }
         }
     }
@@ -519,9 +627,9 @@ bool ModelUploader::addPart(const QFile& file, const QByteArray& contents, const
     if (_totalSize > MAX_SIZE) {
         QMessageBox::warning(NULL,
                              QString("ModelUploader::zip()"),
-                             QString("Model too big, over %1 Bytes.").arg(MAX_SIZE),
+                             QString("Model too big, over %1 MB.").arg(MAX_SIZE / BYTES_PER_MEGABYTES),
                              QMessageBox::Ok);
-        qDebug() << "[Warning] " << QString("Model too big, over %1 Bytes.").arg(MAX_SIZE);
+        qDebug() << "[Warning] " << QString("Model too big, over %1 MB.").arg(MAX_SIZE / BYTES_PER_MEGABYTES);
         return false;
     }
     qDebug() << "Current model size: " << _totalSize;
@@ -542,8 +650,8 @@ ModelPropertiesDialog::ModelPropertiesDialog(ModelType modelType, const QVariant
     _modelType(modelType),
     _originalMapping(originalMapping),
     _basePath(basePath),
-    _geometry(geometry) {
-    
+    _geometry(geometry)
+{
     setWindowTitle("Set Model Properties");
     
     QFormLayout* form = new QFormLayout();
@@ -558,33 +666,35 @@ ModelPropertiesDialog::ModelPropertiesDialog(ModelType modelType, const QVariant
     _scale->setMaximum(FLT_MAX);
     _scale->setSingleStep(0.01);
     
-    if (_modelType == ATTACHMENT_MODEL) {
-        QHBoxLayout* translation = new QHBoxLayout();
-        form->addRow("Translation:", translation);
-        translation->addWidget(_translationX = createTranslationBox());
-        translation->addWidget(_translationY = createTranslationBox());
-        translation->addWidget(_translationZ = createTranslationBox());
-        form->addRow("Pivot About Center:", _pivotAboutCenter = new QCheckBox());
-        form->addRow("Pivot Joint:", _pivotJoint = createJointBox());    
-        connect(_pivotAboutCenter, SIGNAL(toggled(bool)), SLOT(updatePivotJoint()));
-        _pivotAboutCenter->setChecked(true);
-        
-    } else {
-        form->addRow("Left Eye Joint:", _leftEyeJoint = createJointBox());
-        form->addRow("Right Eye Joint:", _rightEyeJoint = createJointBox());
-        form->addRow("Neck Joint:", _neckJoint = createJointBox());
-    }
-    if (_modelType == SKELETON_MODEL) {
-        form->addRow("Root Joint:", _rootJoint = createJointBox());
-        form->addRow("Lean Joint:", _leanJoint = createJointBox());
-        form->addRow("Head Joint:", _headJoint = createJointBox());
-        form->addRow("Left Hand Joint:", _leftHandJoint = createJointBox());
-        form->addRow("Right Hand Joint:", _rightHandJoint = createJointBox());
-        
-        form->addRow("Free Joints:", _freeJoints = new QVBoxLayout());
-        QPushButton* newFreeJoint = new QPushButton("New Free Joint");
-        _freeJoints->addWidget(newFreeJoint);
-        connect(newFreeJoint, SIGNAL(clicked(bool)), SLOT(createNewFreeJoint()));
+    if (_modelType != ENTITY_MODEL) {
+        if (_modelType == ATTACHMENT_MODEL) {
+            QHBoxLayout* translation = new QHBoxLayout();
+            form->addRow("Translation:", translation);
+            translation->addWidget(_translationX = createTranslationBox());
+            translation->addWidget(_translationY = createTranslationBox());
+            translation->addWidget(_translationZ = createTranslationBox());
+            form->addRow("Pivot About Center:", _pivotAboutCenter = new QCheckBox());
+            form->addRow("Pivot Joint:", _pivotJoint = createJointBox());
+            connect(_pivotAboutCenter, SIGNAL(toggled(bool)), SLOT(updatePivotJoint()));
+            _pivotAboutCenter->setChecked(true);
+            
+        } else {
+            form->addRow("Left Eye Joint:", _leftEyeJoint = createJointBox());
+            form->addRow("Right Eye Joint:", _rightEyeJoint = createJointBox());
+            form->addRow("Neck Joint:", _neckJoint = createJointBox());
+        }
+        if (_modelType == SKELETON_MODEL) {
+            form->addRow("Root Joint:", _rootJoint = createJointBox());
+            form->addRow("Lean Joint:", _leanJoint = createJointBox());
+            form->addRow("Head Joint:", _headJoint = createJointBox());
+            form->addRow("Left Hand Joint:", _leftHandJoint = createJointBox());
+            form->addRow("Right Hand Joint:", _rightHandJoint = createJointBox());
+            
+            form->addRow("Free Joints:", _freeJoints = new QVBoxLayout());
+            QPushButton* newFreeJoint = new QPushButton("New Free Joint");
+            _freeJoints->addWidget(newFreeJoint);
+            connect(newFreeJoint, SIGNAL(clicked(bool)), SLOT(createNewFreeJoint()));
+        }
     }
     
     QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
@@ -612,38 +722,40 @@ QVariantHash ModelPropertiesDialog::getMapping() const {
     }
     mapping.insert(JOINT_INDEX_FIELD, jointIndices);
     
-    QVariantHash joints = mapping.value(JOINT_FIELD).toHash();
-    if (_modelType == ATTACHMENT_MODEL) {
-        glm::vec3 pivot;
-        if (_pivotAboutCenter->isChecked()) {
-            pivot = (_geometry.meshExtents.minimum + _geometry.meshExtents.maximum) * 0.5f;
-        
-        } else if (_pivotJoint->currentIndex() != 0) {
-            pivot = extractTranslation(_geometry.joints.at(_pivotJoint->currentIndex() - 1).transform);
+    if (_modelType != ENTITY_MODEL) {
+        QVariantHash joints = mapping.value(JOINT_FIELD).toHash();
+        if (_modelType == ATTACHMENT_MODEL) {
+            glm::vec3 pivot;
+            if (_pivotAboutCenter->isChecked()) {
+                pivot = (_geometry.meshExtents.minimum + _geometry.meshExtents.maximum) * 0.5f;
+                
+            } else if (_pivotJoint->currentIndex() != 0) {
+                pivot = extractTranslation(_geometry.joints.at(_pivotJoint->currentIndex() - 1).transform);
+            }
+            mapping.insert(TRANSLATION_X_FIELD, -pivot.x * _scale->value() + _translationX->value());
+            mapping.insert(TRANSLATION_Y_FIELD, -pivot.y * _scale->value() + _translationY->value());
+            mapping.insert(TRANSLATION_Z_FIELD, -pivot.z * _scale->value() + _translationZ->value());
+            
+        } else {
+            insertJointMapping(joints, "jointEyeLeft", _leftEyeJoint->currentText());
+            insertJointMapping(joints, "jointEyeRight", _rightEyeJoint->currentText());
+            insertJointMapping(joints, "jointNeck", _neckJoint->currentText());
         }
-        mapping.insert(TRANSLATION_X_FIELD, -pivot.x * _scale->value() + _translationX->value());
-        mapping.insert(TRANSLATION_Y_FIELD, -pivot.y * _scale->value() + _translationY->value());
-        mapping.insert(TRANSLATION_Z_FIELD, -pivot.z * _scale->value() + _translationZ->value());
-        
-    } else {
-        insertJointMapping(joints, "jointEyeLeft", _leftEyeJoint->currentText());
-        insertJointMapping(joints, "jointEyeRight", _rightEyeJoint->currentText());
-        insertJointMapping(joints, "jointNeck", _neckJoint->currentText());
-    }
-    if (_modelType == SKELETON_MODEL) {
-        insertJointMapping(joints, "jointRoot", _rootJoint->currentText());
-        insertJointMapping(joints, "jointLean", _leanJoint->currentText());
-        insertJointMapping(joints, "jointHead", _headJoint->currentText());
-        insertJointMapping(joints, "jointLeftHand", _leftHandJoint->currentText());
-        insertJointMapping(joints, "jointRightHand", _rightHandJoint->currentText());
-        
-        mapping.remove(FREE_JOINT_FIELD);
-        for (int i = 0; i < _freeJoints->count() - 1; i++) {
-            QComboBox* box = static_cast<QComboBox*>(_freeJoints->itemAt(i)->widget()->layout()->itemAt(0)->widget());
-            mapping.insertMulti(FREE_JOINT_FIELD, box->currentText());
+        if (_modelType == SKELETON_MODEL) {
+            insertJointMapping(joints, "jointRoot", _rootJoint->currentText());
+            insertJointMapping(joints, "jointLean", _leanJoint->currentText());
+            insertJointMapping(joints, "jointHead", _headJoint->currentText());
+            insertJointMapping(joints, "jointLeftHand", _leftHandJoint->currentText());
+            insertJointMapping(joints, "jointRightHand", _rightHandJoint->currentText());
+            
+            mapping.remove(FREE_JOINT_FIELD);
+            for (int i = 0; i < _freeJoints->count() - 1; i++) {
+                QComboBox* box = static_cast<QComboBox*>(_freeJoints->itemAt(i)->widget()->layout()->itemAt(0)->widget());
+                mapping.insertMulti(FREE_JOINT_FIELD, box->currentText());
+            }
         }
+        mapping.insert(JOINT_FIELD, joints);
     }
-    mapping.insert(JOINT_FIELD, joints);
     
     return mapping;
 }
@@ -658,32 +770,35 @@ void ModelPropertiesDialog::reset() {
     _scale->setValue(_originalMapping.value(SCALE_FIELD).toDouble());
     
     QVariantHash jointHash = _originalMapping.value(JOINT_FIELD).toHash();
-    if (_modelType == ATTACHMENT_MODEL) {
-        _translationX->setValue(_originalMapping.value(TRANSLATION_X_FIELD).toDouble());
-        _translationY->setValue(_originalMapping.value(TRANSLATION_Y_FIELD).toDouble());
-        _translationZ->setValue(_originalMapping.value(TRANSLATION_Z_FIELD).toDouble());    
-        _pivotAboutCenter->setChecked(true);
-        _pivotJoint->setCurrentIndex(0);
-        
-    } else {
-        setJointText(_leftEyeJoint, jointHash.value("jointEyeLeft").toString());
-        setJointText(_rightEyeJoint, jointHash.value("jointEyeRight").toString());
-        setJointText(_neckJoint, jointHash.value("jointNeck").toString());
-    }
-    if (_modelType == SKELETON_MODEL) {
-        setJointText(_rootJoint, jointHash.value("jointRoot").toString());
-        setJointText(_leanJoint, jointHash.value("jointLean").toString());
-        setJointText(_headJoint, jointHash.value("jointHead").toString());
-        setJointText(_leftHandJoint, jointHash.value("jointLeftHand").toString());
-        setJointText(_rightHandJoint, jointHash.value("jointRightHand").toString());
-        
-        while (_freeJoints->count() > 1) {
-            delete _freeJoints->itemAt(0)->widget();
+    
+    if (_modelType != ENTITY_MODEL) {
+        if (_modelType == ATTACHMENT_MODEL) {
+            _translationX->setValue(_originalMapping.value(TRANSLATION_X_FIELD).toDouble());
+            _translationY->setValue(_originalMapping.value(TRANSLATION_Y_FIELD).toDouble());
+            _translationZ->setValue(_originalMapping.value(TRANSLATION_Z_FIELD).toDouble());
+            _pivotAboutCenter->setChecked(true);
+            _pivotJoint->setCurrentIndex(0);
+            
+        } else {
+            setJointText(_leftEyeJoint, jointHash.value("jointEyeLeft").toString());
+            setJointText(_rightEyeJoint, jointHash.value("jointEyeRight").toString());
+            setJointText(_neckJoint, jointHash.value("jointNeck").toString());
         }
-        foreach (const QVariant& joint, _originalMapping.values(FREE_JOINT_FIELD)) {
-            QString jointName = joint.toString();
-            if (_geometry.jointIndices.contains(jointName)) {
-                createNewFreeJoint(jointName);
+        if (_modelType == SKELETON_MODEL) {
+            setJointText(_rootJoint, jointHash.value("jointRoot").toString());
+            setJointText(_leanJoint, jointHash.value("jointLean").toString());
+            setJointText(_headJoint, jointHash.value("jointHead").toString());
+            setJointText(_leftHandJoint, jointHash.value("jointLeftHand").toString());
+            setJointText(_rightHandJoint, jointHash.value("jointRightHand").toString());
+            
+            while (_freeJoints->count() > 1) {
+                delete _freeJoints->itemAt(0)->widget();
+            }
+            foreach (const QVariant& joint, _originalMapping.values(FREE_JOINT_FIELD)) {
+                QString jointName = joint.toString();
+                if (_geometry.jointIndices.contains(jointName)) {
+                    createNewFreeJoint(jointName);
+                }
             }
         }
     }
@@ -726,7 +841,9 @@ QComboBox* ModelPropertiesDialog::createJointBox(bool withNone) const {
         box->addItem("(none)");
     }
     foreach (const FBXJoint& joint, _geometry.joints) {
-        box->addItem(joint.name);
+        if (joint.isSkeletonJoint || !_geometry.hasSkeletonJoints) {
+            box->addItem(joint.name);
+        }
     }
     return box;
 }

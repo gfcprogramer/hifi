@@ -24,73 +24,40 @@
 #include <SharedUtil.h>
 
 #include "AudioRingBuffer.h"
+#include "AudioFormat.h"
+#include "AudioBuffer.h"
+#include "AudioEditBuffer.h"
 #include "Sound.h"
 
-// procedural audio version of Sound
-Sound::Sound(float volume, float frequency, float duration, float decay, QObject* parent) :
-    QObject(parent)
-{
-    static char monoAudioData[MAX_PACKET_SIZE];
-    static int16_t* monoAudioSamples = (int16_t*)(monoAudioData);
+static int soundMetaTypeId = qRegisterMetaType<Sound*>();
 
-    float t;
-    const float AUDIO_CALLBACK_MSECS = (float) NETWORK_BUFFER_LENGTH_SAMPLES_PER_CHANNEL / (float)SAMPLE_RATE * 1000.0;
-    const float MAX_VOLUME = 32000.f;
-    const float MAX_DURATION = 2.f;
-    const float MIN_AUDIBLE_VOLUME = 0.001f;
-    const float NOISE_MAGNITUDE = 0.02f;
-    const int MAX_SAMPLE_VALUE = std::numeric_limits<int16_t>::max();
-    const int MIN_SAMPLE_VALUE = std::numeric_limits<int16_t>::min();
-    int numSamples = NETWORK_BUFFER_LENGTH_SAMPLES_PER_CHANNEL; // we add sounds in chunks of this many samples
-    
-    int chunkStartingSample = 0;
-    float waveFrequency = (frequency / SAMPLE_RATE) * TWO_PI;
-    while (volume > 0.f) {
-        for (int i = 0; i < numSamples; i++) {
-            t = (float)chunkStartingSample + (float)i;
-            float sample = sinf(t * waveFrequency);
-            sample += ((randFloat() - 0.5f) * NOISE_MAGNITUDE);
-            sample *= volume * MAX_VOLUME;
-
-            monoAudioSamples[i] = glm::clamp((int)sample, MIN_SAMPLE_VALUE, MAX_SAMPLE_VALUE);
-            volume *= (1.f - decay);
-        }
-        // add the monoAudioSamples to our actual output Byte Array
-        _byteArray.append(monoAudioData, numSamples * sizeof(int16_t));
-        chunkStartingSample += numSamples;
-        duration = glm::clamp(duration - (AUDIO_CALLBACK_MSECS / 1000.f), 0.f, MAX_DURATION);
-        //qDebug() << "decaying... _duration=" << _duration;
-        if (duration == 0.f || (volume < MIN_AUDIBLE_VOLUME)) {
-            volume = 0.f;
-        }
-    }
+QScriptValue soundSharedPointerToScriptValue(QScriptEngine* engine, SharedSoundPointer const& in) {
+    return engine->newQObject(in.data());
 }
 
-Sound::Sound(const QUrl& sampleURL, QObject* parent) :
-    QObject(parent),
-    _hasDownloaded(false)
-{
-    // assume we have a QApplication or QCoreApplication instance and use the
-    // QNetworkAccess manager to grab the raw audio file at the given URL
-
-    NetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
-
-    qDebug() << "Requesting audio file" << sampleURL.toDisplayString();
-    
-    QNetworkReply* soundDownload = networkAccessManager.get(QNetworkRequest(sampleURL));
-    connect(soundDownload, &QNetworkReply::finished, this, &Sound::replyFinished);
-    connect(soundDownload, SIGNAL(error(QNetworkReply::NetworkError)), this, SLOT(replyError(QNetworkReply::NetworkError)));
+void soundSharedPointerFromScriptValue(const QScriptValue& object, SharedSoundPointer &out) {
+    out = SharedSoundPointer(qobject_cast<Sound*>(object.toQObject()));
 }
 
-void Sound::replyFinished() {
+QScriptValue soundPointerToScriptValue(QScriptEngine* engine, Sound* const& in) {
+    return engine->newQObject(in);
+}
 
-    QNetworkReply* reply = reinterpret_cast<QNetworkReply*>(sender());
+void soundPointerFromScriptValue(const QScriptValue &object, Sound* &out) {
+    out = qobject_cast<Sound*>(object.toQObject());
+}
+
+Sound::Sound(const QUrl& url, bool isStereo) :
+    Resource(url),
+    _isStereo(isStereo),
+    _isReady(false)
+{
     
+}
+
+void Sound::downloadFinished(QNetworkReply* reply) {
     // replace our byte array with the downloaded data
     QByteArray rawAudioByteArray = reply->readAll();
-
-    // foreach(QByteArray b, reply->rawHeaderList())
-    //     qDebug() << b.constData() << ": " << reply->rawHeader(b).constData();
 
     if (reply->hasRawHeader("Content-Type")) {
 
@@ -106,23 +73,26 @@ void Sound::replyFinished() {
             interpretAsWav(rawAudioByteArray, outputAudioByteArray);
             downSample(outputAudioByteArray);
         } else {
-            //  Process as RAW file
+            // check if this was a stereo raw file
+            // since it's raw the only way for us to know that is if the file was called .stereo.raw
+            if (reply->url().fileName().toLower().endsWith("stereo.raw")) {
+                _isStereo = true;
+                qDebug() << "Processing sound from" << reply->url() << "as stereo audio file.";
+            }
+            
+            // Process as RAW file
             downSample(rawAudioByteArray);
         }
+        trimFrames();
     } else {
         qDebug() << "Network reply without 'Content-Type'.";
     }
     
-    _hasDownloaded = true;
-}
-
-void Sound::replyError(QNetworkReply::NetworkError code) {
-    QNetworkReply* reply = reinterpret_cast<QNetworkReply*>(sender());
-    qDebug() << "Error downloading sound file at" << reply->url().toString() << "-" << reply->errorString();
+    _isReady = true;
+    reply->deleteLater();
 }
 
 void Sound::downSample(const QByteArray& rawAudioByteArray) {
-
     // assume that this was a RAW file and is now an array of samples that are
     // signed, 16-bit, 48Khz, mono
 
@@ -135,13 +105,42 @@ void Sound::downSample(const QByteArray& rawAudioByteArray) {
     int16_t* sourceSamples = (int16_t*) rawAudioByteArray.data();
     int16_t* destinationSamples = (int16_t*) _byteArray.data();
 
-    for (int i = 1; i < numSourceSamples; i += 2) {
-        if (i + 1 >= numSourceSamples) {
-            destinationSamples[(i - 1) / 2] = (sourceSamples[i - 1] / 2) + (sourceSamples[i] / 2);
-        } else {
-            destinationSamples[(i - 1) / 2] = (sourceSamples[i - 1] / 4) + (sourceSamples[i] / 2) + (sourceSamples[i + 1] / 4);
+    
+    if (_isStereo) {
+        for (int i = 0; i < numSourceSamples; i += 4) {
+            destinationSamples[i / 2] = (sourceSamples[i] / 2) + (sourceSamples[i + 2] / 2);
+            destinationSamples[(i / 2) + 1] = (sourceSamples[i + 1] / 2) + (sourceSamples[i + 3] / 2);
+        }
+    } else {
+        for (int i = 1; i < numSourceSamples; i += 2) {
+            if (i + 1 >= numSourceSamples) {
+                destinationSamples[(i - 1) / 2] = (sourceSamples[i - 1] / 2) + (sourceSamples[i] / 2);
+            } else {
+                destinationSamples[(i - 1) / 2] = (sourceSamples[i - 1] / 4) + (sourceSamples[i] / 2)
+                                                + (sourceSamples[i + 1] / 4);
+            }
         }
     }
+}
+
+void Sound::trimFrames() {
+    
+    const uint32_t inputFrameCount = _byteArray.size() / sizeof(int16_t);
+    const uint32_t trimCount = 1024;  // number of leading and trailing frames to trim
+    
+    if (inputFrameCount <= (2 * trimCount)) {
+        return;
+    }
+    
+    int16_t* inputFrameData = (int16_t*)_byteArray.data();
+
+    AudioEditBufferFloat32 editBuffer(1, inputFrameCount);
+    editBuffer.copyFrames(1, inputFrameCount, inputFrameData, false /*copy in*/);
+    
+    editBuffer.linearFade(0, trimCount, true);
+    editBuffer.linearFade(inputFrameCount - trimCount, inputFrameCount, false);
+    
+    editBuffer.copyFrames(1, inputFrameCount, inputFrameData, true /*copy out*/);
 }
 
 //
@@ -224,10 +223,12 @@ void Sound::interpretAsWav(const QByteArray& inputAudioByteArray, QByteArray& ou
             qDebug() << "Currently not supporting non PCM audio files.";
             return;
         }
-        if (qFromLittleEndian<quint16>(fileHeader.wave.numChannels) != 1) {
-            qDebug() << "Currently not supporting stereo audio files.";
-            return;
+        if (qFromLittleEndian<quint16>(fileHeader.wave.numChannels) == 2) {
+            _isStereo = true;
+        } else if (qFromLittleEndian<quint16>(fileHeader.wave.numChannels) > 2) {
+            qDebug() << "Currently not support audio files with more than 2 channels.";
         }
+        
         if (qFromLittleEndian<quint16>(fileHeader.wave.bitsPerSample) != 16) {
             qDebug() << "Currently not supporting non 16bit audio files.";
             return;

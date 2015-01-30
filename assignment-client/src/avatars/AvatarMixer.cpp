@@ -15,7 +15,7 @@
 #include <QtCore/QTimer>
 #include <QtCore/QThread>
 
-#include <Logging.h>
+#include <LogHandler.h>
 #include <NodeList.h>
 #include <PacketHeaders.h>
 #include <SharedUtil.h>
@@ -41,7 +41,7 @@ AvatarMixer::AvatarMixer(const QByteArray& packet) :
     _sumIdentityPackets(0)
 {
     // make sure we hear about node kills so we can tell the other nodes
-    connect(NodeList::getInstance(), &NodeList::nodeKilled, this, &AvatarMixer::nodeKilled);
+    connect(DependencyManager::get<NodeList>().data(), &NodeList::nodeKilled, this, &AvatarMixer::nodeKilled);
 }
 
 AvatarMixer::~AvatarMixer() {
@@ -117,12 +117,12 @@ void AvatarMixer::broadcastAvatarData() {
     
     int numPacketHeaderBytes = populatePacketHeader(mixedAvatarByteArray, PacketTypeBulkAvatarData);
     
-    NodeList* nodeList = NodeList::getInstance();
+    auto nodeList = DependencyManager::get<NodeList>();
     
     AvatarMixerClientData* nodeData = NULL;
     AvatarMixerClientData* otherNodeData = NULL;
     
-    foreach (const SharedNodePointer& node, nodeList->getNodeHash()) {
+    nodeList->eachNode([&](const SharedNodePointer& node) {
         if (node->getLinkedData() && node->getType() == NodeType::Agent && node->getActiveSocket()
             && (nodeData = reinterpret_cast<AvatarMixerClientData*>(node->getLinkedData()))->getMutex().tryLock()) {
             ++_sumListeners;
@@ -135,7 +135,7 @@ void AvatarMixer::broadcastAvatarData() {
             
             // this is an AGENT we have received head data from
             // send back a packet with other active node data to this node
-            foreach (const SharedNodePointer& otherNode, nodeList->getNodeHash()) {
+            nodeList->eachNode([&](const SharedNodePointer& otherNode) {
                 if (otherNode->getLinkedData() && otherNode->getUUID() != node->getUUID()
                     && (otherNodeData = reinterpret_cast<AvatarMixerClientData*>(otherNode->getLinkedData()))->getMutex().tryLock()) {
                     
@@ -146,11 +146,11 @@ void AvatarMixer::broadcastAvatarData() {
                     float distanceToAvatar = glm::length(myPosition - otherPosition);
                     //  The full rate distance is the distance at which EVERY update will be sent for this avatar
                     //  at a distance of twice the full rate distance, there will be a 50% chance of sending this avatar's update
-                    const float FULL_RATE_DISTANCE = 2.f;
+                    const float FULL_RATE_DISTANCE = 2.0f;
                     
                     //  Decide whether to send this avatar's data based on it's distance from us
                     if ((_performanceThrottlingRatio == 0 || randFloat() < (1.0f - _performanceThrottlingRatio))
-                        && (distanceToAvatar == 0.f || randFloat() < FULL_RATE_DISTANCE / distanceToAvatar)) {
+                        && (distanceToAvatar == 0.0f || randFloat() < FULL_RATE_DISTANCE / distanceToAvatar)) {
                         QByteArray avatarByteArray;
                         avatarByteArray.append(otherNode->getUUID().toRfc4122());
                         avatarByteArray.append(otherAvatar.toByteArray());
@@ -203,13 +203,13 @@ void AvatarMixer::broadcastAvatarData() {
                 
                     otherNodeData->getMutex().unlock();
                 }
-            }
+            });
             
             nodeList->writeDatagram(mixedAvatarByteArray, node);
             
             nodeData->getMutex().unlock();
         }
-    }
+    });
     
     _lastFrameTimestamp = QDateTime::currentMSecsSinceEpoch();
 }
@@ -222,7 +222,7 @@ void AvatarMixer::nodeKilled(SharedNodePointer killedNode) {
         QByteArray killPacket = byteArrayWithPopulatedHeader(PacketTypeKillAvatar);
         killPacket += killedNode->getUUID().toRfc4122();
         
-        NodeList::getInstance()->broadcastToNodes(killPacket,
+        DependencyManager::get<NodeList>()->broadcastToNodes(killPacket,
                                                   NodeSet() << NodeType::Agent);
     }
 }
@@ -231,7 +231,7 @@ void AvatarMixer::readPendingDatagrams() {
     QByteArray receivedPacket;
     HifiSockAddr senderSockAddr;
     
-    NodeList* nodeList = NodeList::getInstance();
+    auto nodeList = DependencyManager::get<NodeList>();
     
     while (readAvailableDatagram(receivedPacket, senderSockAddr)) {
         if (nodeList->packetVersionAndHashMatch(receivedPacket)) {
@@ -309,7 +309,7 @@ void AvatarMixer::sendStatsPacket() {
 void AvatarMixer::run() {
     ThreadedAssignment::commonInit(AVATAR_MIXER_LOGGING_NAME, NodeType::AvatarMixer);
     
-    NodeList* nodeList = NodeList::getInstance();
+    auto nodeList = DependencyManager::get<NodeList>();
     nodeList->addNodeTypeToInterestSet(NodeType::Agent);
     
     nodeList->linkedDataCreateCallback = attachAvatarDataToNode;

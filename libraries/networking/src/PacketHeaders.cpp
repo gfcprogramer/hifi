@@ -49,12 +49,15 @@ PacketVersion versionForPacketType(PacketType type) {
     switch (type) {
         case PacketTypeMicrophoneAudioNoEcho:
         case PacketTypeMicrophoneAudioWithEcho:
-        case PacketTypeSilentAudioFrame:
             return 2;
+        case PacketTypeSilentAudioFrame:
+            return 4;
         case PacketTypeMixedAudio:
             return 1;
+        case PacketTypeInjectAudio:
+            return 1;
         case PacketTypeAvatarData:
-            return 3;
+            return 5;
         case PacketTypeAvatarIdentity:
             return 1;
         case PacketTypeEnvironmentData:
@@ -65,25 +68,76 @@ PacketVersion versionForPacketType(PacketType type) {
         case PacketTypeCreateAssignment:
         case PacketTypeRequestAssignment:
             return 2;
-        case PacketTypeVoxelSet:
-        case PacketTypeVoxelSetDestructive:
-            return 1;
         case PacketTypeOctreeStats:
             return 1;
-        case PacketTypeParticleData:
-            return 1;
-        case PacketTypeParticleErase:
-            return 1;
-        case PacketTypeModelData:
+        case PacketTypeEntityAddOrEdit:
+        case PacketTypeEntityData:
+            return VERSION_ENTITIES_HAS_LAST_SIMULATED_TIME;
+        case PacketTypeEntityErase:
             return 2;
-        case PacketTypeModelErase:
-            return 1;
         case PacketTypeAudioStreamStats:
             return 1;
+        case PacketTypeMetavoxelData:
+            return 13;
         default:
             return 0;
     }
 }
+
+#define PACKET_TYPE_NAME_LOOKUP(x) case x:  return QString(#x);
+
+QString nameForPacketType(PacketType type) {
+    switch (type) {
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeUnknown);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeStunResponse);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeDomainList);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypePing);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypePingReply);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeKillAvatar);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeAvatarData);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeInjectAudio);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeMixedAudio);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeMicrophoneAudioNoEcho);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeMicrophoneAudioWithEcho);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeBulkAvatarData);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeSilentAudioFrame);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeEnvironmentData);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeDomainListRequest);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeRequestAssignment);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeCreateAssignment);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeDomainConnectionDenied);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeMuteEnvironment);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeAudioStreamStats);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeDataServerConfirm);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeOctreeStats);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeJurisdiction);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeJurisdictionRequest);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeMetavoxelData);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeAvatarIdentity);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeAvatarBillboard);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeDomainConnectRequest);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeDomainServerRequireDTLS);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeNodeJsonStats);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeEntityQuery);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeEntityData);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeEntityAddOrEdit);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeEntityErase);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeEntityAddResponse);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeOctreeDataNack);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeAudioEnvironment);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeEntityEditNack);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeSignedTransactionPayment);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeIceServerHeartbeat);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeIceServerHeartbeatResponse);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeUnverifiedPing);
+        PACKET_TYPE_NAME_LOOKUP(PacketTypeUnverifiedPingReply);
+        default:
+            return QString("Type: ") + QString::number((int)type);
+    }
+    return QString("unexpected");
+}
+
+
 
 QByteArray byteArrayWithPopulatedHeader(PacketType type, const QUuid& connectionUUID) {
     QByteArray freshByteArray(MAX_PACKET_HEADER_BYTES, 0);
@@ -105,7 +159,7 @@ int populatePacketHeader(char* packet, PacketType type, const QUuid& connectionU
     
     char* position = packet + numTypeBytes + sizeof(PacketVersion);
     
-    QUuid packUUID = connectionUUID.isNull() ? LimitedNodeList::getInstance()->getSessionUUID() : connectionUUID;
+    QUuid packUUID = connectionUUID.isNull() ? DependencyManager::get<LimitedNodeList>()->getSessionUUID() : connectionUUID;
     
     QByteArray rfcUUID = packUUID.toRfc4122();
     memcpy(position, rfcUUID.constData(), NUM_BYTES_RFC4122_UUID);

@@ -9,22 +9,43 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
-#include "../../Application.h"
+#include <NetworkAccessManager.h>
+
+#include "Application.h"
 
 #include "BillboardOverlay.h"
 
-BillboardOverlay::BillboardOverlay()
-: _fromImage(-1,-1,-1,-1),
-  _scale(1.0f),
-  _isFacingAvatar(true) {
+BillboardOverlay::BillboardOverlay() :
+    _newTextureNeeded(true),
+    _fromImage(-1,-1,-1,-1),
+    _scale(1.0f),
+    _isFacingAvatar(true)
+{
+      _isLoaded = false;
 }
 
-void BillboardOverlay::render() {
-    if (!_visible) {
+BillboardOverlay::BillboardOverlay(const BillboardOverlay* billboardOverlay) :
+    Base3DOverlay(billboardOverlay),
+    _url(billboardOverlay->_url),
+    _billboard(billboardOverlay->_billboard),
+    _size(),
+    _billboardTexture(),
+    _newTextureNeeded(true),
+    _fromImage(billboardOverlay->_fromImage),
+    _scale(billboardOverlay->_scale),
+    _isFacingAvatar(billboardOverlay->_isFacingAvatar)
+{
+}
+
+void BillboardOverlay::render(RenderArgs* args) {
+    if (!_visible || !_isLoaded) {
         return;
     }
     
     if (!_billboard.isEmpty()) {
+        if (_newTextureNeeded && _billboardTexture) {
+            _billboardTexture.reset();
+        }
         if (!_billboardTexture) {
             QImage image = QImage::fromData(_billboard);
             if (image.format() != QImage::Format_ARGB32) {
@@ -35,6 +56,7 @@ void BillboardOverlay::render() {
                 _fromImage.setRect(0, 0, _size.width(), _size.height());
             }
             _billboardTexture.reset(new Texture());
+            _newTextureNeeded = false;
             glBindTexture(GL_TEXTURE_2D, _billboardTexture->getID());
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, _size.width(), _size.height(), 0,
                          GL_BGRA, GL_UNSIGNED_BYTE, image.constBits());
@@ -53,16 +75,16 @@ void BillboardOverlay::render() {
     
     glPushMatrix(); {
         glTranslatef(_position.x, _position.y, _position.z);
+        glm::quat rotation;
         if (_isFacingAvatar) {
             // rotate about vertical to face the camera
-            glm::quat rotation = Application::getInstance()->getCamera()->getRotation();
+            rotation = Application::getInstance()->getCamera()->getRotation();
             rotation *= glm::angleAxis(glm::pi<float>(), glm::vec3(0.0f, 1.0f, 0.0f));
-            glm::vec3 axis = glm::axis(rotation);
-            glRotatef(glm::degrees(glm::angle(rotation)), axis.x, axis.y, axis.z);
         } else {
-            glm::vec3 axis = glm::axis(_rotation);
-            glRotatef(glm::degrees(glm::angle(_rotation)), axis.x, axis.y, axis.z);
+            rotation = getRotation();
         }
+        glm::vec3 axis = glm::axis(rotation);
+        glRotatef(glm::degrees(glm::angle(rotation)), axis.x, axis.y, axis.z);
         glScalef(_scale, _scale, _scale);
         
         if (_billboardTexture) {
@@ -70,31 +92,21 @@ void BillboardOverlay::render() {
             float x = _fromImage.width() / (2.0f * maxSize);
             float y = -_fromImage.height() / (2.0f * maxSize);
             
-            glColor3f(1.0f, 1.0f, 1.0f);
-            glBegin(GL_QUADS); {
-                glTexCoord2f((float)_fromImage.x() / (float)_size.width(),
-                             (float)_fromImage.y() / (float)_size.height());
-                glVertex2f(-x, -y);
-                glTexCoord2f(((float)_fromImage.x() + (float)_fromImage.width()) / (float)_size.width(),
-                             (float)_fromImage.y() / (float)_size.height());
-                glVertex2f(x, -y);
-                glTexCoord2f(((float)_fromImage.x() + (float)_fromImage.width()) / (float)_size.width(),
-                             ((float)_fromImage.y() + (float)_fromImage.height()) / _size.height());
-                glVertex2f(x, y);
-                glTexCoord2f((float)_fromImage.x() / (float)_size.width(),
-                             ((float)_fromImage.y() + (float)_fromImage.height()) / (float)_size.height());
-                glVertex2f(-x, y);
-            } glEnd();
-        } else {
-            glColor4f(0.5f, 0.5f, 0.5f, 1.0f);
-            glBegin(GL_QUADS); {
-                glVertex2f(-1.0f, -1.0f);
-                glVertex2f(1.0f, -1.0f);
-                glVertex2f(1.0f, 1.0f);
-                glVertex2f(-1.0f, 1.0f);
-            } glEnd();
+            const float MAX_COLOR = 255.0f;
+            xColor color = getColor();
+            float alpha = getAlpha();
+            
+            glm::vec2 topLeft(-x, -y);
+            glm::vec2 bottomRight(x, y);
+            glm::vec2 texCoordTopLeft((float)_fromImage.x() / (float)_size.width(), 
+                                      (float)_fromImage.y() / (float)_size.height());
+            glm::vec2 texCoordBottomRight(((float)_fromImage.x() + (float)_fromImage.width()) / (float)_size.width(),
+                                          ((float)_fromImage.y() + (float)_fromImage.height()) / _size.height());
+
+            DependencyManager::get<GeometryCache>()->renderQuad(topLeft, bottomRight, texCoordTopLeft, texCoordBottomRight,
+                                                                glm::vec4(color.red / MAX_COLOR, color.green / MAX_COLOR, color.blue / MAX_COLOR, alpha));
+            
         }
-        
     } glPopMatrix();
     
     glDisable(GL_TEXTURE_2D);
@@ -109,9 +121,10 @@ void BillboardOverlay::setProperties(const QScriptValue &properties) {
     
     QScriptValue urlValue = properties.property("url");
     if (urlValue.isValid()) {
-        _url = urlValue.toVariant().toString();
-        
-        setBillboardURL(_url);
+        QString newURL = urlValue.toVariant().toString();
+        if (newURL != _url) {
+            setBillboardURL(newURL);
+        }
     }
     
     QScriptValue subImageBounds = properties.property("subImage");
@@ -146,28 +159,44 @@ void BillboardOverlay::setProperties(const QScriptValue &properties) {
         _scale = scaleValue.toVariant().toFloat();
     }
     
-    QScriptValue rotationValue = properties.property("rotation");
-    if (rotationValue.isValid()) {
-        QScriptValue x = rotationValue.property("x");
-        QScriptValue y = rotationValue.property("y");
-        QScriptValue z = rotationValue.property("z");
-        QScriptValue w = rotationValue.property("w");
-        if (x.isValid() && y.isValid() && z.isValid() && w.isValid()) {
-            _rotation.x = x.toVariant().toFloat();
-            _rotation.y = y.toVariant().toFloat();
-            _rotation.z = z.toVariant().toFloat();
-            _rotation.w = w.toVariant().toFloat();
-        }
-    }
-    
     QScriptValue isFacingAvatarValue = properties.property("isFacingAvatar");
     if (isFacingAvatarValue.isValid()) {
         _isFacingAvatar = isFacingAvatarValue.toVariant().toBool();
     }
 }
 
-void BillboardOverlay::setBillboardURL(const QUrl url) {
-    QNetworkReply* reply = NetworkAccessManager::getInstance().get(QNetworkRequest(url));
+QScriptValue BillboardOverlay::getProperty(const QString& property) {
+    if (property == "url") {
+        return _url;
+    }
+    if (property == "subImage") {
+        return qRectToScriptValue(_scriptEngine, _fromImage);
+    }
+    if (property == "scale") {
+        return _scale;
+    }
+    if (property == "isFacingAvatar") {
+        return _isFacingAvatar;
+    }
+
+    return Base3DOverlay::getProperty(property);
+}
+
+void BillboardOverlay::setURL(const QString& url) {
+    setBillboardURL(url);
+}
+
+void BillboardOverlay::setBillboardURL(const QString& url) {
+    _url = url;
+    QUrl actualURL = url;
+
+    _isLoaded = false;
+
+    // clear the billboard if previously set
+    _billboard.clear();
+    _newTextureNeeded = true;
+
+    QNetworkReply* reply = NetworkAccessManager::getInstance().get(QNetworkRequest(actualURL));
     connect(reply, &QNetworkReply::finished, this, &BillboardOverlay::replyFinished);
 }
 
@@ -175,4 +204,26 @@ void BillboardOverlay::replyFinished() {
     // replace our byte array with the downloaded data
     QNetworkReply* reply = static_cast<QNetworkReply*>(sender());
     _billboard = reply->readAll();
+    _isLoaded = true;
+    reply->deleteLater();
+}
+
+bool BillboardOverlay::findRayIntersection(const glm::vec3& origin, const glm::vec3& direction,
+                                                        float& distance, BoxFace& face) {
+
+    if (_billboardTexture) {
+        float maxSize = glm::max(_fromImage.width(), _fromImage.height());
+        float x = _fromImage.width() / (2.0f * maxSize);
+        float y = -_fromImage.height() / (2.0f * maxSize);
+        float maxDimension = glm::max(x,y);
+        float scaledDimension = maxDimension * _scale;
+        glm::vec3 corner = getCenter() - glm::vec3(scaledDimension, scaledDimension, scaledDimension) ;
+        AACube myCube(corner, scaledDimension * 2.0f);
+        return myCube.findRayIntersection(origin, direction, distance, face);
+    }
+    return false;
+}
+
+BillboardOverlay* BillboardOverlay::createClone() const {
+    return new BillboardOverlay(this);
 }

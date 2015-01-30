@@ -440,10 +440,13 @@ static bool testSerialization(Bitstream::MetadataType metadataType) {
 }
 
 bool MetavoxelTests::run() {
-    LimitedNodeList::createInstance();
+    DependencyManager::set<LimitedNodeList>();
 
     // seed the random number generator so that our tests are reproducible
     srand(0xBAAAAABE);
+
+    // register our test attribute
+    AttributePointer testAttribute = AttributeRegistry::getInstance()->registerAttribute(new FloatAttribute("testAttribute"));
 
     // check for an optional command line argument specifying a single test
     QStringList arguments = this->arguments();
@@ -582,8 +585,8 @@ public:
 };
 
 RandomVisitor::RandomVisitor() :
-    MetavoxelVisitor(QVector<AttributePointer>(),
-        QVector<AttributePointer>() << AttributeRegistry::getInstance()->getColorAttribute()),
+    MetavoxelVisitor(QVector<AttributePointer>(), QVector<AttributePointer>() <<
+        AttributeRegistry::getInstance()->getAttribute("testAttribute")),
     leafCount(0) {
 }
 
@@ -594,8 +597,7 @@ int RandomVisitor::visit(MetavoxelInfo& info) {
     if (info.size > MAXIMUM_LEAF_SIZE || (info.size > MINIMUM_LEAF_SIZE && randomBoolean())) {
         return DEFAULT_ORDER;
     }
-    info.outputValues[0] = OwnedAttributeValue(_outputs.at(0), encodeInline<QRgb>(qRgb(randomColorValue(),
-        randomColorValue(), randomColorValue())));
+    info.outputValues[0] = OwnedAttributeValue(_outputs.at(0), encodeInline<float>(randFloat()));
     leafCount++;
     return STOP_RECURSION;
 }
@@ -603,31 +605,27 @@ int RandomVisitor::visit(MetavoxelInfo& info) {
 class TestSendRecord : public PacketRecord {
 public:
     
-    TestSendRecord(const MetavoxelLOD& lod = MetavoxelLOD(), const MetavoxelData& data = MetavoxelData(),
-        const SharedObjectPointer& localState = SharedObjectPointer(), int packetNumber = 0);
+    TestSendRecord(int packetNumber = 0, const MetavoxelLOD& lod = MetavoxelLOD(), const MetavoxelData& data = MetavoxelData(),
+        const SharedObjectPointer& localState = SharedObjectPointer());
     
     const SharedObjectPointer& getLocalState() const { return _localState; }
-    int getPacketNumber() const { return _packetNumber; }
     
 private:
     
     SharedObjectPointer _localState;
-    int _packetNumber;
-    
 };
 
-TestSendRecord::TestSendRecord(const MetavoxelLOD& lod, const MetavoxelData& data,
-        const SharedObjectPointer& localState, int packetNumber) :
-    PacketRecord(lod, data),
-    _localState(localState),
-    _packetNumber(packetNumber) {
+TestSendRecord::TestSendRecord(int packetNumber, const MetavoxelLOD& lod, const MetavoxelData& data,
+        const SharedObjectPointer& localState) :
+    PacketRecord(packetNumber, lod, data),
+    _localState(localState) {
 }
 
 class TestReceiveRecord : public PacketRecord {
 public:
     
-    TestReceiveRecord(const MetavoxelLOD& lod = MetavoxelLOD(), const MetavoxelData& data = MetavoxelData(),
-        const SharedObjectPointer& remoteState = SharedObjectPointer());
+    TestReceiveRecord(int packetNumber = 0, const MetavoxelLOD& lod = MetavoxelLOD(),
+        const MetavoxelData& data = MetavoxelData(), const SharedObjectPointer& remoteState = SharedObjectPointer());
 
     const SharedObjectPointer& getRemoteState() const { return _remoteState; }
 
@@ -636,9 +634,9 @@ private:
     SharedObjectPointer _remoteState;
 };
 
-TestReceiveRecord::TestReceiveRecord(const MetavoxelLOD& lod,
+TestReceiveRecord::TestReceiveRecord(int packetNumber, const MetavoxelLOD& lod,
         const MetavoxelData& data, const SharedObjectPointer& remoteState) :
-    PacketRecord(lod, data),
+    PacketRecord(packetNumber, lod, data),
     _remoteState(remoteState) {
 }
 
@@ -816,8 +814,8 @@ private:
 };
 
 MutateVisitor::MutateVisitor() :
-    MetavoxelVisitor(QVector<AttributePointer>(),
-        QVector<AttributePointer>() << AttributeRegistry::getInstance()->getColorAttribute()),
+    MetavoxelVisitor(QVector<AttributePointer>(), QVector<AttributePointer>() <<
+        AttributeRegistry::getInstance()->getAttribute("testAttribute")),
     _mutationsRemaining(randIntInRange(2, 4)) {
 }
 
@@ -828,8 +826,7 @@ int MutateVisitor::visit(MetavoxelInfo& info) {
     if (info.size > MAXIMUM_LEAF_SIZE || (info.size > MINIMUM_LEAF_SIZE && randomBoolean())) {
         return encodeRandomOrder();
     }
-    info.outputValues[0] = OwnedAttributeValue(_outputs.at(0), encodeInline<QRgb>(qRgb(randomColorValue(),
-        randomColorValue(), randomColorValue())));
+    info.outputValues[0] = OwnedAttributeValue(_outputs.at(0), encodeInline<float>(randFloat()));
     _mutationsRemaining--;
     metavoxelMutationsPerformed++;
     return STOP_RECURSION;
@@ -1110,14 +1107,14 @@ void TestEndpoint::handleMessage(const QVariant& message, Bitstream& in) {
 
 PacketRecord* TestEndpoint::maybeCreateSendRecord() const {
     if (_reliableDeltaChannel) {
-        return new TestSendRecord(_reliableDeltaLOD, _reliableDeltaData, _localState, _sequencer.getOutgoingPacketNumber());
+        return new TestSendRecord(_sequencer.getOutgoingPacketNumber(), _reliableDeltaLOD, _reliableDeltaData, _localState);
     }
-    return new TestSendRecord(_lod, (_mode == METAVOXEL_CLIENT_MODE) ? MetavoxelData() : _data,
-        _localState, _sequencer.getOutgoingPacketNumber());
+    return new TestSendRecord(_sequencer.getOutgoingPacketNumber(), _lod,
+        (_mode == METAVOXEL_CLIENT_MODE) ? MetavoxelData() : _data, _localState);
 }
 
 PacketRecord* TestEndpoint::maybeCreateReceiveRecord() const {
-    return new TestReceiveRecord(_remoteDataLOD, _remoteData, _remoteState);
+    return new TestReceiveRecord(_sequencer.getIncomingPacketNumber(), _remoteDataLOD, _remoteData, _remoteState);
 }
 
 void TestEndpoint::handleHighPriorityMessage(const QVariant& message) {

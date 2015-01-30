@@ -11,11 +11,12 @@
 
 #include <QtCore/QWeakPointer>
 
+#include <AccountManager.h>
 #include <PerfStat.h>
 
 #include "Application.h"
+#include "Audio.h"
 #include "Menu.h"
-#include "ui/OAuthWebViewHandler.h"
 
 #include "DatagramProcessor.h"
 
@@ -34,9 +35,9 @@ void DatagramProcessor::processDatagrams() {
     static QByteArray incomingPacket;
     
     Application* application = Application::getInstance();
-    NodeList* nodeList = NodeList::getInstance();
+    auto nodeList = DependencyManager::get<NodeList>();
     
-    while (NodeList::getInstance()->getNodeSocket().hasPendingDatagrams()) {
+    while (DependencyManager::get<NodeList>()->getNodeSocket().hasPendingDatagrams()) {
         incomingPacket.resize(nodeList->getNodeSocket().pendingDatagramSize());
         nodeList->getNodeSocket().readDatagram(incomingPacket.data(), incomingPacket.size(),
                                                senderSockAddr.getAddressPointer(), senderSockAddr.getPortPointer());
@@ -45,56 +46,53 @@ void DatagramProcessor::processDatagrams() {
         _byteCount += incomingPacket.size();
         
         if (nodeList->packetVersionAndHashMatch(incomingPacket)) {
+            
+            PacketType incomingType = packetTypeForPacket(incomingPacket);
             // only process this packet if we have a match on the packet version
-            switch (packetTypeForPacket(incomingPacket)) {
-                case PacketTypeMixedAudio:
-                    QMetaObject::invokeMethod(&application->_audio, "addReceivedAudioToBuffer", Qt::QueuedConnection,
-                                              Q_ARG(QByteArray, incomingPacket));
-                    break;
+            switch (incomingType) {
+                case PacketTypeAudioEnvironment:
                 case PacketTypeAudioStreamStats:
-                    QMetaObject::invokeMethod(&application->_audio, "parseAudioStreamStatsPacket", Qt::QueuedConnection,
-                        Q_ARG(QByteArray, incomingPacket));
+                case PacketTypeMixedAudio:
+                case PacketTypeSilentAudioFrame: {
+                    if (incomingType == PacketTypeAudioStreamStats) {
+                        QMetaObject::invokeMethod(DependencyManager::get<Audio>().data(), "parseAudioStreamStatsPacket",
+                                                  Qt::QueuedConnection,
+                                                  Q_ARG(QByteArray, incomingPacket));
+                    } else if (incomingType == PacketTypeAudioEnvironment) {
+                        QMetaObject::invokeMethod(DependencyManager::get<Audio>().data(), "parseAudioEnvironmentData",
+                                                  Qt::QueuedConnection,
+                                                  Q_ARG(QByteArray, incomingPacket));
+                    } else {
+                        QMetaObject::invokeMethod(DependencyManager::get<Audio>().data(), "addReceivedAudioToStream",
+                                                  Qt::QueuedConnection,
+                                                  Q_ARG(QByteArray, incomingPacket));
+                    }
+                    
+                    // update having heard from the audio-mixer and record the bytes received
+                    SharedNodePointer audioMixer = nodeList->sendingNodeForPacket(incomingPacket);
+                    
+                    if (audioMixer) {
+                        audioMixer->setLastHeardMicrostamp(usecTimestampNow());
+                        audioMixer->recordBytesReceived(incomingPacket.size());
+                    }
+                    
                     break;
-                case PacketTypeParticleAddResponse:
+                }
+                case PacketTypeEntityAddResponse:
                     // this will keep creatorTokenIDs to IDs mapped correctly
-                    Particle::handleAddParticleResponse(incomingPacket);
-                    application->getParticles()->getTree()->handleAddParticleResponse(incomingPacket);
+                    EntityItemID::handleAddEntityResponse(incomingPacket);
+                    application->getEntities()->getTree()->handleAddEntityResponse(incomingPacket);
                     break;
-                case PacketTypeModelAddResponse:
-                    // this will keep creatorTokenIDs to IDs mapped correctly
-                    ModelItem::handleAddModelResponse(incomingPacket);
-                    application->getModels()->getTree()->handleAddModelResponse(incomingPacket);
-                    break;
-                case PacketTypeParticleData:
-                case PacketTypeParticleErase:
-                case PacketTypeModelData:
-                case PacketTypeModelErase:
-                case PacketTypeVoxelData:
-                case PacketTypeVoxelErase:
+                case PacketTypeEntityData:
+                case PacketTypeEntityErase:
                 case PacketTypeOctreeStats:
                 case PacketTypeEnvironmentData: {
                     PerformanceWarning warn(Menu::getInstance()->isOptionChecked(MenuOption::PipelineWarnings),
                                             "Application::networkReceive()... _octreeProcessor.queueReceivedPacket()");
-                    
-                    bool wantExtraDebugging = application->getLogger()->extraDebugging();
-                    if (wantExtraDebugging && packetTypeForPacket(incomingPacket) == PacketTypeVoxelData) {
-                        int numBytesPacketHeader = numBytesForPacketHeader(incomingPacket);
-                        unsigned char* dataAt = reinterpret_cast<unsigned char*>(incomingPacket.data()) + numBytesPacketHeader;
-                        dataAt += sizeof(OCTREE_PACKET_FLAGS);
-                        OCTREE_PACKET_SEQUENCE sequence = (*(OCTREE_PACKET_SEQUENCE*)dataAt);
-                        dataAt += sizeof(OCTREE_PACKET_SEQUENCE);
-                        OCTREE_PACKET_SENT_TIME sentAt = (*(OCTREE_PACKET_SENT_TIME*)dataAt);
-                        dataAt += sizeof(OCTREE_PACKET_SENT_TIME);
-                        OCTREE_PACKET_SENT_TIME arrivedAt = usecTimestampNow();
-                        int flightTime = arrivedAt - sentAt;
-                        
-                        qDebug("got PacketType_VOXEL_DATA, sequence:%d flightTime:%d", sequence, flightTime);
-                    }
-                    
-                    SharedNodePointer matchedNode = NodeList::getInstance()->sendingNodeForPacket(incomingPacket);
+                    SharedNodePointer matchedNode = DependencyManager::get<NodeList>()->sendingNodeForPacket(incomingPacket);
                     
                     if (matchedNode) {
-                        // add this packet to our list of voxel packets and process them on the voxel processing
+                        // add this packet to our list of octree packets and process them on the octree data processing
                         application->_octreeProcessor.queueReceivedPacket(matchedNode, incomingPacket);
                     }
                     
@@ -122,45 +120,43 @@ void DatagramProcessor::processDatagrams() {
                     application->_bandwidthMeter.inputStream(BandwidthMeter::AVATARS).updateValue(incomingPacket.size());
                     break;
                 }
-                case PacketTypeDomainOAuthRequest: {
-                    QDataStream readStream(incomingPacket);
-                    readStream.skipRawData(numBytesForPacketHeader(incomingPacket));
-                    
-                    QUrl authorizationURL;
-                    readStream >> authorizationURL;
-                    
-                    QMetaObject::invokeMethod(&OAuthWebViewHandler::getInstance(), "displayWebviewForAuthorizationURL",
-                                              Q_ARG(const QUrl&, authorizationURL));
-                    
+                case PacketTypeDomainConnectionDenied: {
+                    // output to the log so the user knows they got a denied connection request
+                    // and check and signal for an access token so that we can make sure they are logged in
+                    qDebug() << "The domain-server denied a connection request.";
+                    qDebug() << "You may need to re-log to generate a keypair so you can provide a username signature.";
+                    AccountManager::getInstance().checkAndSignalForAccessToken();
                     break;
                 }
+                case PacketTypeNoisyMute:
                 case PacketTypeMuteEnvironment: {
-                    glm::vec3 position;
-                    float radius;
+                    bool mute = !DependencyManager::get<Audio>()->isMuted();
                     
-                    int headerSize = numBytesForPacketHeaderGivenPacketType(PacketTypeMuteEnvironment);
-                    memcpy(&position, incomingPacket.constData() + headerSize, sizeof(glm::vec3));
-                    memcpy(&radius, incomingPacket.constData() + headerSize + sizeof(glm::vec3), sizeof(float));
+                    if (incomingType == PacketTypeMuteEnvironment) {
+                        glm::vec3 position;
+                        float radius, distance;
+                        
+                        int headerSize = numBytesForPacketHeaderGivenPacketType(PacketTypeMuteEnvironment);
+                        memcpy(&position, incomingPacket.constData() + headerSize, sizeof(glm::vec3));
+                        memcpy(&radius, incomingPacket.constData() + headerSize + sizeof(glm::vec3), sizeof(float));
+                        distance = glm::distance(Application::getInstance()->getAvatar()->getPosition(), position);
+                        
+                        mute = mute && (distance < radius);
+                    }
                     
-                    if (glm::distance(Application::getInstance()->getAvatar()->getPosition(), position) < radius
-                        && !Application::getInstance()->getAudio()->getMuted()) {
-                        Application::getInstance()->getAudio()->toggleMute();
+                    if (mute) {
+                        DependencyManager::get<Audio>()->toggleMute();
+                        if (incomingType == PacketTypeMuteEnvironment) {
+                            AudioScriptingInterface::getInstance().environmentMuted();
+                        } else {
+                            AudioScriptingInterface::getInstance().mutedByMixer();
+                        }
                     }
                     break;
                 }
-                case PacketTypeVoxelEditNack:
+                case PacketTypeEntityEditNack:
                     if (!Menu::getInstance()->isOptionChecked(MenuOption::DisableNackPackets)) {
-                        application->_voxelEditSender.processNackPacket(incomingPacket);
-                    }
-                    break;
-                case PacketTypeParticleEditNack:
-                    if (!Menu::getInstance()->isOptionChecked(MenuOption::DisableNackPackets)) {
-                        application->_particleEditSender.processNackPacket(incomingPacket);
-                    }
-                    break;
-                case PacketTypeModelEditNack:
-                    if (!Menu::getInstance()->isOptionChecked(MenuOption::DisableNackPackets)) {
-                        application->_modelEditSender.processNackPacket(incomingPacket);
+                        application->_entityEditSender.processNackPacket(incomingPacket);
                     }
                     break;
                 default:

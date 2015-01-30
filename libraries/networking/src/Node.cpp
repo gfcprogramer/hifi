@@ -12,11 +12,12 @@
 #include <cstring>
 #include <stdio.h>
 
+#include <UUID.h>
+
 #include "Node.h"
 #include "SharedUtil.h"
 
 #include <QtCore/QDataStream>
-#include <QtCore/QDateTime>
 #include <QtCore/QDebug>
 
 const QString UNKNOWN_NodeType_t_NAME = "Unknown";
@@ -27,14 +28,11 @@ namespace NodeType {
 
 void NodeType::init() {
     TypeNameHash.insert(NodeType::DomainServer, "Domain Server");
-    TypeNameHash.insert(NodeType::VoxelServer, "Voxel Server");
-    TypeNameHash.insert(NodeType::ParticleServer, "Particle Server");
-    TypeNameHash.insert(NodeType::ModelServer, "Model Server");
+    TypeNameHash.insert(NodeType::EntityServer, "Entity Server");
     TypeNameHash.insert(NodeType::MetavoxelServer, "Metavoxel Server");
     TypeNameHash.insert(NodeType::Agent, "Agent");
     TypeNameHash.insert(NodeType::AudioMixer, "Audio Mixer");
     TypeNameHash.insert(NodeType::AvatarMixer, "Avatar Mixer");
-    TypeNameHash.insert(NodeType::AnimationServer, "Animation Server");
     TypeNameHash.insert(NodeType::Unassigned, "Unassigned");
 }
 
@@ -44,18 +42,15 @@ const QString& NodeType::getNodeTypeName(NodeType_t nodeType) {
 }
 
 Node::Node(const QUuid& uuid, NodeType_t type, const HifiSockAddr& publicSocket, const HifiSockAddr& localSocket) :
+	NetworkPeer(uuid, publicSocket, localSocket),
     _type(type),
-    _uuid(uuid),
-    _wakeTimestamp(QDateTime::currentMSecsSinceEpoch()),
-    _lastHeardMicrostamp(usecTimestampNow()),
-    _publicSocket(publicSocket),
-    _localSocket(localSocket),
-    _symmetricSocket(),
     _activeSocket(NULL),
+    _symmetricSocket(),
     _connectionSecret(),
     _bytesReceivedMovingAverage(NULL),
     _linkedData(NULL),
     _isAlive(true),
+    _pingMs(-1),  // "Uninitialized"
     _clockSkewUsec(0),
     _mutex(),
     _clockSkewMovingPercentile(30, 0.8f)   // moving 80th percentile of 30 samples
@@ -66,48 +61,6 @@ Node::Node(const QUuid& uuid, NodeType_t type, const HifiSockAddr& publicSocket,
 Node::~Node() {
     delete _linkedData;
     delete _bytesReceivedMovingAverage;
-}
-
-void Node::setPublicSocket(const HifiSockAddr& publicSocket) {
-    if (_activeSocket == &_publicSocket) {
-        // if the active socket was the public socket then reset it to NULL
-        _activeSocket = NULL;
-    }
-
-    _publicSocket = publicSocket;
-}
-
-void Node::setLocalSocket(const HifiSockAddr& localSocket) {
-    if (_activeSocket == &_localSocket) {
-        // if the active socket was the local socket then reset it to NULL
-        _activeSocket = NULL;
-    }
-
-    _localSocket = localSocket;
-}
-
-void Node::setSymmetricSocket(const HifiSockAddr& symmetricSocket) {
-    if (_activeSocket == &_symmetricSocket) {
-        // if the active socket was the symmetric socket then reset it to NULL
-        _activeSocket = NULL;
-    }
-    
-    _symmetricSocket = symmetricSocket;
-}
-
-void Node::activateLocalSocket() {
-    qDebug() << "Activating local socket for node" << *this;
-    _activeSocket = &_localSocket;
-}
-
-void Node::activatePublicSocket() {
-    qDebug() << "Activating public socket for node" << *this;
-    _activeSocket = &_publicSocket;
-}
-
-void Node::activateSymmetricSocket() {
-    qDebug() << "Activating symmetric socket for node" << *this;
-    _activeSocket = &_symmetricSocket;
 }
 
 void Node::recordBytesReceived(int bytesReceived) {
@@ -137,6 +90,66 @@ float Node::getAverageKilobitsPerSecond() {
 void Node::updateClockSkewUsec(int clockSkewSample) {
     _clockSkewMovingPercentile.updatePercentile((float)clockSkewSample);
     _clockSkewUsec = (int)_clockSkewMovingPercentile.getValueAtPercentile();
+}
+
+void Node::setPublicSocket(const HifiSockAddr& publicSocket) {
+    if (publicSocket != _publicSocket) {
+        if (_activeSocket == &_publicSocket) {
+            // if the active socket was the public socket then reset it to NULL
+            _activeSocket = NULL;
+        }
+        
+        if (!_publicSocket.isNull()) {
+            qDebug() << "Public socket change for node" << *this;
+        }
+        
+        _publicSocket = publicSocket;
+    }
+}
+
+void Node::setLocalSocket(const HifiSockAddr& localSocket) {
+    if (localSocket != _localSocket) {
+        if (_activeSocket == &_localSocket) {
+            // if the active socket was the local socket then reset it to NULL
+            _activeSocket = NULL;
+        }
+        
+        if (!_localSocket.isNull()) {
+            qDebug() << "Local socket change for node" << *this;
+        }
+        
+        _localSocket = localSocket;
+    }
+}
+
+void Node::setSymmetricSocket(const HifiSockAddr& symmetricSocket) {
+    if (symmetricSocket != _symmetricSocket) {
+        if (_activeSocket == &_symmetricSocket) {
+            // if the active socket was the symmetric socket then reset it to NULL
+            _activeSocket = NULL;
+        }
+        
+        if (!_symmetricSocket.isNull()) {
+            qDebug() << "Symmetric socket change for node" << *this;
+        }
+        
+        _symmetricSocket = symmetricSocket;
+    }
+}
+
+void Node::activateLocalSocket() {
+    qDebug() << "Activating local socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
+    _activeSocket = &_localSocket;
+}
+
+void Node::activatePublicSocket() {
+    qDebug() << "Activating public socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
+    _activeSocket = &_publicSocket;
+}
+
+void Node::activateSymmetricSocket() {
+    qDebug() << "Activating symmetric socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
+    _activeSocket = &_symmetricSocket;
 }
 
 QDataStream& operator<<(QDataStream& out, const Node& node) {

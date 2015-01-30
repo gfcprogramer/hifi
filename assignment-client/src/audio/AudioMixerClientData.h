@@ -13,29 +13,39 @@
 #define hifi_AudioMixerClientData_h
 
 #include <AABox.h>
-#include <NodeData.h>
-#include <PositionalAudioRingBuffer.h>
+#include <AudioFormat.h> // For AudioFilterHSF1s and _penumbraFilter
+#include <AudioBuffer.h> // For AudioFilterHSF1s and _penumbraFilter
+#include <AudioFilter.h> // For AudioFilterHSF1s and _penumbraFilter
+#include <AudioFilterBank.h> // For AudioFilterHSF1s and _penumbraFilter
 
-#include "AvatarAudioRingBuffer.h"
-#include "AudioStreamStats.h"
-#include "SequenceNumberStats.h"
+#include "PositionalAudioStream.h"
+#include "AvatarAudioStream.h"
 
+class PerListenerSourcePairData {
+public:
+    PerListenerSourcePairData() { 
+        _penumbraFilter.initialize(AudioConstants::SAMPLE_RATE, AudioConstants::NETWORK_FRAME_SAMPLES_STEREO / 2);
+    };
+    AudioFilterHSF1s& getPenumbraFilter() { return _penumbraFilter; }
 
-const int INCOMING_SEQ_STATS_HISTORY_LENGTH_SECONDS = 30;
+private:
+    AudioFilterHSF1s _penumbraFilter;
+};
 
 class AudioMixerClientData : public NodeData {
 public:
     AudioMixerClientData();
     ~AudioMixerClientData();
     
-    const QList<PositionalAudioRingBuffer*> getRingBuffers() const { return _ringBuffers; }
-    AvatarAudioRingBuffer* getAvatarAudioRingBuffer() const;
+    const QHash<QUuid, PositionalAudioStream*>& getAudioStreams() const { return _audioStreams; }
+    AvatarAudioStream* getAvatarAudioStream() const;
     
     int parseData(const QByteArray& packet);
-    void checkBuffersBeforeFrameSend(AABox* checkSourceZone = NULL, AABox* listenerZone = NULL);
-    void pushBuffersAfterFrameSend();
 
-    AudioStreamStats getAudioStreamStatsOfStream(const PositionalAudioRingBuffer* ringBuffer) const;
+    void checkBuffersBeforeFrameSend();
+
+    void removeDeadInjectedStreams();
+
     QString getAudioStreamStatsString() const;
     
     void sendAudioStreamStatsPackets(const SharedNodePointer& destinationNode);
@@ -43,12 +53,19 @@ public:
     void incrementOutgoingMixedAudioSequenceNumber() { _outgoingMixedAudioSequenceNumber++; }
     quint16 getOutgoingSequenceNumber() const { return _outgoingMixedAudioSequenceNumber; }
 
+    void printUpstreamDownstreamStats() const;
+
+    PerListenerSourcePairData* getListenerSourcePairData(const QUuid& sourceUUID);
 private:
-    QList<PositionalAudioRingBuffer*> _ringBuffers;
+    void printAudioStreamStats(const AudioStreamStats& streamStats) const;
+
+private:
+    QHash<QUuid, PositionalAudioStream*> _audioStreams;     // mic stream stored under key of null UUID
+
+    // TODO: how can we prune this hash when a stream is no longer present?
+    QHash<QUuid, PerListenerSourcePairData*> _listenerSourcePairData;
 
     quint16 _outgoingMixedAudioSequenceNumber;
-    SequenceNumberStats _incomingAvatarAudioSequenceNumberStats;
-    QHash<QUuid, SequenceNumberStats> _incomingInjectedAudioSequenceNumberStatsMap;
 
     AudioStreamStats _downstreamAudioStreamStats;
 };

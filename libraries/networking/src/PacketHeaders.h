@@ -19,73 +19,81 @@
 #include "UUID.h"
 
 // NOTE: if adding a new packet type, you can replace one marked usable or add at the end
-
+// NOTE: if you want the name of the packet type to be available for debugging or logging, update nameForPacketType() as well
 enum PacketType {
-    PacketTypeUnknown,
+    PacketTypeUnknown, // 0
     PacketTypeStunResponse,
     PacketTypeDomainList,
     PacketTypePing,
     PacketTypePingReply,
-    PacketTypeKillAvatar,
+    PacketTypeKillAvatar, // 5
     PacketTypeAvatarData,
     PacketTypeInjectAudio,
     PacketTypeMixedAudio,
     PacketTypeMicrophoneAudioNoEcho,
-    PacketTypeMicrophoneAudioWithEcho,
+    PacketTypeMicrophoneAudioWithEcho, // 10
     PacketTypeBulkAvatarData,
     PacketTypeSilentAudioFrame,
     PacketTypeEnvironmentData,
     PacketTypeDomainListRequest,
-    PacketTypeRequestAssignment,
+    PacketTypeRequestAssignment, // 15
     PacketTypeCreateAssignment,
-    PacketTypeDomainOAuthRequest,
+    PacketTypeDomainConnectionDenied,
     PacketTypeMuteEnvironment,
     PacketTypeAudioStreamStats,
-    PacketTypeDataServerConfirm,
-    PacketTypeVoxelQuery,
-    PacketTypeVoxelData,
-    PacketTypeVoxelSet,
-    PacketTypeVoxelSetDestructive,
-    PacketTypeVoxelErase,
-    PacketTypeOctreeStats, // 26
+    PacketTypeDataServerConfirm, // 20
+    UNUSED_5,
+    UNUSED_6,
+    UNUSED_7,
+    UNUSED_8,
+    UNUSED_9, // 25
+    PacketTypeOctreeStats,
     PacketTypeJurisdiction,
     PacketTypeJurisdictionRequest,
-    PacketTypeParticleQuery,
-    PacketTypeParticleData,
-    PacketTypeParticleAddOrEdit,
-    PacketTypeParticleErase,
-    PacketTypeParticleAddResponse,
+    UNUSED_1,
+    UNUSED_2, // 30
+    UNUSED_3,
+    UNUSED_4,
+    PacketTypeNoisyMute,
     PacketTypeMetavoxelData,
-    PacketTypeAvatarIdentity,
+    PacketTypeAvatarIdentity, // 35
     PacketTypeAvatarBillboard,
     PacketTypeDomainConnectRequest,
     PacketTypeDomainServerRequireDTLS,
     PacketTypeNodeJsonStats,
-    PacketTypeModelQuery,
-    PacketTypeModelData, // 41
-    PacketTypeModelAddOrEdit,
-    PacketTypeModelErase,
-    PacketTypeModelAddResponse,
+    PacketTypeEntityQuery, // 40
+    PacketTypeEntityData,
+    PacketTypeEntityAddOrEdit,
+    PacketTypeEntityErase,
+    PacketTypeEntityAddResponse,
     PacketTypeOctreeDataNack, // 45
-    PacketTypeVoxelEditNack,
-    PacketTypeParticleEditNack,
-    PacketTypeModelEditNack,
+    UNUSED_10,
+    PacketTypeAudioEnvironment,
+    PacketTypeEntityEditNack,
+    PacketTypeSignedTransactionPayment,
+    PacketTypeIceServerHeartbeat, // 50
+    PacketTypeIceServerHeartbeatResponse,
+    PacketTypeUnverifiedPing,
+    PacketTypeUnverifiedPingReply
 };
 
 typedef char PacketVersion;
 
 const QSet<PacketType> NON_VERIFIED_PACKETS = QSet<PacketType>()
     << PacketTypeDomainServerRequireDTLS << PacketTypeDomainConnectRequest
-    << PacketTypeDomainList << PacketTypeDomainListRequest << PacketTypeDomainOAuthRequest
+    << PacketTypeDomainList << PacketTypeDomainListRequest << PacketTypeDomainConnectionDenied
     << PacketTypeCreateAssignment << PacketTypeRequestAssignment << PacketTypeStunResponse
-    << PacketTypeNodeJsonStats << PacketTypeVoxelQuery << PacketTypeParticleQuery << PacketTypeModelQuery
-    << PacketTypeOctreeDataNack << PacketTypeVoxelEditNack << PacketTypeParticleEditNack << PacketTypeModelEditNack;
+    << PacketTypeNodeJsonStats << PacketTypeEntityQuery
+    << PacketTypeOctreeDataNack << PacketTypeEntityEditNack
+    << PacketTypeIceServerHeartbeat << PacketTypeIceServerHeartbeatResponse
+    << PacketTypeUnverifiedPing << PacketTypeUnverifiedPingReply;
 
 const int NUM_BYTES_MD5_HASH = 16;
 const int NUM_STATIC_HEADER_BYTES = sizeof(PacketVersion) + NUM_BYTES_RFC4122_UUID;
 const int MAX_PACKET_HEADER_BYTES = sizeof(PacketType) + NUM_BYTES_MD5_HASH + NUM_STATIC_HEADER_BYTES;
 
 PacketVersion versionForPacketType(PacketType type);
+QString nameForPacketType(PacketType type);
 
 const QUuid nullUUID = QUuid();
 
@@ -110,5 +118,15 @@ PacketType packetTypeForPacket(const char* packet);
 
 int arithmeticCodingValueFromBuffer(const char* checkValue);
 int numBytesArithmeticCodingFromBuffer(const char* checkValue);
+
+const PacketVersion VERSION_ENTITIES_HAVE_ANIMATION = 1;
+const PacketVersion VERSION_ROOT_ELEMENT_HAS_DATA = 2;
+const PacketVersion VERSION_ENTITIES_SUPPORT_SPLIT_MTU = 3;
+const PacketVersion VERSION_ENTITIES_HAS_FILE_BREAKS = VERSION_ENTITIES_SUPPORT_SPLIT_MTU;
+const PacketVersion VERSION_ENTITIES_SUPPORT_DIMENSIONS = 4;
+const PacketVersion VERSION_ENTITIES_MODELS_HAVE_ANIMATION_SETTINGS = 5;
+const PacketVersion VERSION_ENTITIES_HAVE_USER_DATA = 6;
+const PacketVersion VERSION_ENTITIES_HAS_LAST_SIMULATED_TIME = 7;
+const PacketVersion VERSION_OCTREE_HAS_FILE_BREAKS = 1;
 
 #endif // hifi_PacketHeaders_h

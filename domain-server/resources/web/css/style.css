@@ -1,8 +1,12 @@
-#nodes-lead, #settings-lead {
+body {
+  position: relative;
+}
+
+.table-lead {
   color: #66CCCC;
 }
 
-#nodes-lead .lead-line, #settings-lead .lead-line {
+.table-lead .lead-line {
   background-color: #66CCCC;
 }
 
@@ -46,4 +50,54 @@ span.port {
 
 .stale {
   color: red;
+}
+
+.locked {
+  color: #428bca;
+}
+
+.locked-table {
+  cursor: not-allowed;
+  background-color: #eee;
+}
+
+.advanced-setting {
+  display: none;
+}
+
+#setup-sidebar.affix {
+  position: fixed;
+  top: 15px;
+}
+
+#setup-sidebar button {
+  width: 100%;
+  margin-top: 10px;
+}
+
+#small-save-button {
+  width: 100%;
+  margin-bottom: 15px;
+}
+
+td.buttons {
+  width: 14px;
+}
+
+td .glyphicon {
+  text-align: center;
+  font-size: 12px;
+}
+
+td.add-del-buttons .glyphicon {
+  display: block;
+}
+
+td.reorder-buttons .glyphicon {
+  display: inherit;
+}
+
+tr.new-row {
+  color: #3c763d;
+  background-color: #dff0d8;
 }

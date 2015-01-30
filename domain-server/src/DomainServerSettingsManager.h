@@ -12,24 +12,35 @@
 #ifndef hifi_DomainServerSettingsManager_h
 #define hifi_DomainServerSettingsManager_h
 
+#include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 
+#include <HifiConfigVariantMap.h>
 #include <HTTPManager.h>
 
-class DomainServerSettingsManager : public QObject, HTTPRequestHandler {
+class DomainServerSettingsManager : public QObject {
     Q_OBJECT
 public:
     DomainServerSettingsManager();
-    bool handleHTTPRequest(HTTPConnection* connection, const QUrl& url);
+    bool handlePublicHTTPRequest(HTTPConnection* connection, const QUrl& url);
+    bool handleAuthenticatedHTTPRequest(HTTPConnection* connection, const QUrl& url);
     
-    QByteArray getJSONSettingsMap() const;
+    void setupConfigMap(const QStringList& argumentList);
+    QVariant valueOrDefaultValueForKeyPath(const QString& keyPath);
+    
+    QVariantMap& getSettingsMap() { return _configMap.getMergedConfig(); }
 private:
+    QJsonObject responseObjectForType(const QString& typeValue, bool isAuthenticated = false);
     void recurseJSONObjectAndOverwriteSettings(const QJsonObject& postedObject, QVariantMap& settingsVariant,
-                                               QJsonObject descriptionObject);
+                                               const QJsonArray& descriptionArray);
+    bool settingExists(const QString& groupName, const QString& settingName,
+                       const QJsonArray& descriptionArray, QJsonValue& settingDescription);
+    void updateSetting(const QString& key, const QJsonValue& newValue, QVariantMap& settingMap,
+                       const QJsonValue& settingDescription);
     void persistToFile();
     
-    QJsonObject _descriptionObject;
-    QVariantMap _settingsMap;
+    QJsonArray _descriptionArray;
+    HifiConfigVariantMap _configMap;
 };
 
 #endif // hifi_DomainServerSettingsManager_h

@@ -14,30 +14,24 @@
 #include <QPushButton>
 #include <QPixmap>
 
+#include <PathUtils.h>
+
 #include "Application.h"
 #include "Menu.h"
 #include "AccountManager.h"
 #include "ui_loginDialog.h"
-
 #include "LoginDialog.h"
 
-const QString FORGOT_PASSWORD_URL = "https://data.highfidelity.io/password/new";
+const QString FORGOT_PASSWORD_URL = "https://data.highfidelity.io/users/password/new";
 
 LoginDialog::LoginDialog(QWidget* parent) :
     FramelessDialog(parent, 0, FramelessDialog::POSITION_TOP),
     _ui(new Ui::LoginDialog) {
 
     _ui->setupUi(this);
-    _ui->errorLabel->hide();
-    _ui->emailLineEdit->setFocus();
-    _ui->logoLabel->setPixmap(QPixmap(Application::resourcesPath() + "images/hifi-logo.svg"));
-    _ui->loginButton->setIcon(QIcon(Application::resourcesPath() + "images/login.svg"));
-    _ui->infoLabel->setVisible(false);
-    _ui->errorLabel->setVisible(false);
-
-    setModal(true);
-    setWindowModality(Qt::WindowModal);
-    setHideOnBlur(false);
+    reset();
+        
+    setAttribute(Qt::WA_DeleteOnClose, false);
 
     connect(&AccountManager::getInstance(), &AccountManager::loginComplete,
             this, &LoginDialog::handleLoginCompleted);
@@ -53,9 +47,21 @@ LoginDialog::~LoginDialog() {
     delete _ui;
 };
 
-void LoginDialog::handleLoginCompleted(const QUrl& authURL) {
+void LoginDialog::reset() {
+    _ui->errorLabel->hide();
+    _ui->emailLineEdit->setFocus();
+    _ui->logoLabel->setPixmap(QPixmap(PathUtils::resourcesPath() + "images/hifi-logo.svg"));
+    _ui->loginButton->setIcon(QIcon(PathUtils::resourcesPath() + "images/login.svg"));
     _ui->infoLabel->setVisible(false);
     _ui->errorLabel->setVisible(false);
+    
+    _ui->emailLineEdit->setText("");
+    _ui->passwordLineEdit->setText("");
+    _ui->loginArea->setDisabled(false);
+}
+
+void LoginDialog::handleLoginCompleted(const QUrl& authURL) {
+    reset();
     close();
 };
 
@@ -90,3 +96,27 @@ void LoginDialog::moveEvent(QMoveEvent* event) {
     // Modal dialogs seemed to get repositioned automatically.  Combat this by moving the window if needed.
     resizeAndPosition();
 };
+
+
+void LoginDialog::toggleQAction() {
+    AccountManager& accountManager = AccountManager::getInstance();
+    QAction* loginAction = Menu::getInstance()->getActionForOption(MenuOption::Login);
+    Q_CHECK_PTR(loginAction);
+    
+    disconnect(loginAction, 0, 0, 0);
+    
+    if (accountManager.isLoggedIn()) {
+        // change the menu item to logout
+        loginAction->setText("Logout " + accountManager.getAccountInfo().getUsername());
+        connect(loginAction, &QAction::triggered, &accountManager, &AccountManager::logout);
+    } else {
+        // change the menu item to login
+        loginAction->setText("Login");
+        connect(loginAction, &QAction::triggered, this, &LoginDialog::showLoginForCurrentDomain);
+    }
+}
+
+void LoginDialog::showLoginForCurrentDomain() {
+    show();
+    resizeAndPosition(false);
+}

@@ -11,10 +11,11 @@
 
 #include <QTimer>
 
+#include <GLMHelpers.h>
 #include <PerfStat.h>
+#include <Settings.h>
 #include <SharedUtil.h>
 
-#include "Application.h"
 #include "Faceshift.h"
 #include "Menu.h"
 #include "Util.h"
@@ -26,11 +27,22 @@ using namespace fs;
 using namespace std;
 
 const quint16 FACESHIFT_PORT = 33433;
+float STARTING_FACESHIFT_FRAME_TIME = 0.033f;
+
+namespace SettingHandles {
+    const SettingHandle<float> faceshiftEyeDeflection("faceshiftEyeDeflection", DEFAULT_FACESHIFT_EYE_DEFLECTION);
+    const SettingHandle<QString> faceshiftHostname("faceshiftHostname", DEFAULT_FACESHIFT_HOSTNAME);
+}
 
 Faceshift::Faceshift() :
     _tcpEnabled(true),
     _tcpRetryCount(0),
     _lastTrackingStateReceived(0),
+    _averageFrameTime(STARTING_FACESHIFT_FRAME_TIME),
+    _headAngularVelocity(0),
+    _headLinearVelocity(0),
+    _lastHeadTranslation(0),
+    _filteredHeadTranslation(0),
     _eyeGazeLeftPitch(0.0f),
     _eyeGazeLeftYaw(0.0f),
     _eyeGazeRightPitch(0.0f),
@@ -61,6 +73,9 @@ Faceshift::Faceshift() :
 
     _udpSocket.bind(FACESHIFT_PORT);
 #endif
+    
+    _eyeDeflection = SettingHandles::faceshiftEyeDeflection.get();
+    _hostname = SettingHandles::faceshiftHostname.get();
 }
 
 void Faceshift::init() {
@@ -119,8 +134,14 @@ void Faceshift::reset() {
 }
 
 void Faceshift::updateFakeCoefficients(float leftBlink, float rightBlink, float browUp,
-        float jawOpen, QVector<float>& coefficients) const {
-    coefficients.resize(max((int)coefficients.size(), _jawOpenIndex + 1));
+        float jawOpen, float mouth2, float mouth3, float mouth4, QVector<float>& coefficients) const {
+    const int MMMM_BLENDSHAPE = 34;
+    const int FUNNEL_BLENDSHAPE = 40;
+    const int SMILE_LEFT_BLENDSHAPE = 28;
+    const int SMILE_RIGHT_BLENDSHAPE = 29;
+    const int MAX_FAKE_BLENDSHAPE = 40;  //  Largest modified blendshape from above and below
+
+    coefficients.resize(max((int)coefficients.size(), MAX_FAKE_BLENDSHAPE + 1));
     qFill(coefficients.begin(), coefficients.end(), 0.0f);
     coefficients[_leftBlinkIndex] = leftBlink;
     coefficients[_rightBlinkIndex] = rightBlink;
@@ -128,6 +149,9 @@ void Faceshift::updateFakeCoefficients(float leftBlink, float rightBlink, float 
     coefficients[_browUpLeftIndex] = browUp;
     coefficients[_browUpRightIndex] = browUp;
     coefficients[_jawOpenIndex] = jawOpen;
+    coefficients[SMILE_LEFT_BLENDSHAPE] = coefficients[SMILE_RIGHT_BLENDSHAPE] = mouth4;
+    coefficients[MMMM_BLENDSHAPE] = mouth2;
+    coefficients[FUNNEL_BLENDSHAPE] = mouth3;
 }
 
 void Faceshift::setTCPEnabled(bool enabled) {
@@ -145,7 +169,7 @@ void Faceshift::connectSocket() {
             qDebug("Faceshift: Connecting...");
         }
 
-        _tcpSocket.connectToHost("localhost", FACESHIFT_PORT);
+        _tcpSocket.connectToHost(_hostname, FACESHIFT_PORT);
         _tracking = false;
     }
 }
@@ -209,23 +233,41 @@ void Faceshift::receive(const QByteArray& buffer) {
                     float theta = 2 * acos(r.w);
                     if (theta > EPSILON) {
                         float rMag = glm::length(glm::vec3(r.x, r.y, r.z));
-                        float AVERAGE_FACESHIFT_FRAME_TIME = 0.033f;
-                        _headAngularVelocity = theta / AVERAGE_FACESHIFT_FRAME_TIME * glm::vec3(r.x, r.y, r.z) / rMag;
+                        _headAngularVelocity = theta / _averageFrameTime * glm::vec3(r.x, r.y, r.z) / rMag;
                     } else {
                         _headAngularVelocity = glm::vec3(0,0,0);
                     }
-                    _headRotation = newRotation;
+                    const float ANGULAR_VELOCITY_FILTER_STRENGTH = 0.3f;
+                    _headRotation = safeMix(_headRotation, newRotation, glm::clamp(glm::length(_headAngularVelocity) *
+                                                                                   ANGULAR_VELOCITY_FILTER_STRENGTH, 0.0f, 1.0f));
 
                     const float TRANSLATION_SCALE = 0.02f;
-                    _headTranslation = glm::vec3(data.m_headTranslation.x, data.m_headTranslation.y,
-                        -data.m_headTranslation.z) * TRANSLATION_SCALE;
+                    glm::vec3 newHeadTranslation = glm::vec3(data.m_headTranslation.x, data.m_headTranslation.y,
+                                                            -data.m_headTranslation.z) * TRANSLATION_SCALE;
+                    
+                    _headLinearVelocity = (newHeadTranslation - _lastHeadTranslation) / _averageFrameTime;
+                    
+                    const float LINEAR_VELOCITY_FILTER_STRENGTH = 0.3f;
+                    float velocityFilter = glm::clamp(1.0f - glm::length(_headLinearVelocity) *
+                                                      LINEAR_VELOCITY_FILTER_STRENGTH, 0.0f, 1.0f);
+                    _filteredHeadTranslation = velocityFilter * _filteredHeadTranslation + (1.0f - velocityFilter) * newHeadTranslation;
+                    
+                    _lastHeadTranslation = newHeadTranslation;
+                    _headTranslation = _filteredHeadTranslation;
+                    
                     _eyeGazeLeftPitch = -data.m_eyeGazeLeftPitch;
                     _eyeGazeLeftYaw = data.m_eyeGazeLeftYaw;
                     _eyeGazeRightPitch = -data.m_eyeGazeRightPitch;
                     _eyeGazeRightYaw = data.m_eyeGazeRightYaw;
                     _blendshapeCoefficients = QVector<float>::fromStdVector(data.m_coeffs);
 
-                    _lastTrackingStateReceived = usecTimestampNow();
+                    const float FRAME_AVERAGING_FACTOR = 0.99f;
+                    quint64 usecsNow = usecTimestampNow();
+                    if (_lastTrackingStateReceived != 0) {
+                        _averageFrameTime = FRAME_AVERAGING_FACTOR * _averageFrameTime +
+                        (1.0f - FRAME_AVERAGING_FACTOR) * (float)(usecsNow - _lastTrackingStateReceived) / 1000000.0f;
+                    }
+                    _lastTrackingStateReceived = usecsNow;
                 }
                 break;
             }
@@ -276,4 +318,14 @@ void Faceshift::receive(const QByteArray& buffer) {
         }
     }
 #endif
+}
+
+void Faceshift::setEyeDeflection(float faceshiftEyeDeflection) {
+    _eyeDeflection = faceshiftEyeDeflection;
+    SettingHandles::faceshiftEyeDeflection.set(_eyeDeflection);
+}
+
+void Faceshift::setHostname(const QString& hostname) {
+    _hostname = hostname;
+    SettingHandles::faceshiftHostname.set(_hostname);
 }

@@ -1,39 +1,8 @@
-cmake_minimum_required(VERSION 2.8)
-
-if (WIN32)
-  cmake_policy (SET CMP0020 NEW)
-endif (WIN32)
-
-set(ROOT_DIR ../..)
-set(MACRO_DIR "${ROOT_DIR}/cmake/macros")
-
 set(TARGET_NAME shared)
-project(${TARGET_NAME})
 
-find_package(Qt5 COMPONENTS Network Widgets Xml Script)
+# use setup_hifi_library macro to setup our project and link appropriate Qt modules
+# TODO: there isn't really a good reason to have Script linked here - let's get what is requiring it out (RegisteredMetaTypes.cpp)
+setup_hifi_library(Network Script Widgets)
 
-include(${MACRO_DIR}/SetupHifiLibrary.cmake)
-setup_hifi_library(${TARGET_NAME})
-
-# include GLM
-include(${MACRO_DIR}/IncludeGLM.cmake)
-include_glm(${TARGET_NAME} "${ROOT_DIR}")
-
-set(EXTERNAL_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external")
-
-if (WIN32)
-    # include headers for external libraries and InterfaceConfig.
-    include_directories("${EXTERNAL_ROOT_DIR}")
-endif (WIN32)
-
-# link required libraries on UNIX
-if (UNIX AND NOT APPLE)
-    find_package(Threads REQUIRED)
-    target_link_libraries(${TARGET_NAME} "${CMAKE_THREAD_LIBS_INIT}")
-endif (UNIX AND NOT APPLE)
-
-# There is something special (bug) about Qt5Scripts, that we have to explicitly add its include
-# directory when Qt5 (5.2.1) is compiled from source and is not in a standard place.
-include_directories(SYSTEM "${Qt5Script_INCLUDE_DIRS}")
-
-target_link_libraries(${TARGET_NAME} Qt5::Network Qt5::Widgets)
+# call macro to include our dependency includes and bubble them up via a property on our target
+include_dependency_includes()

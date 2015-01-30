@@ -14,10 +14,11 @@
 
 #include <FBXReader.h>
 #include <PerfStat.h>
+#include <TextRenderer.h>
 
 #include "Application.h"
 #include "PrioVR.h"
-#include "ui/TextRenderer.h"
+#include "scripting/JoystickScriptingInterface.h"
 
 #ifdef HAVE_PRIOVR
 const unsigned int SERIAL_LIST[] = { 0x00000001, 0x00000000, 0x00000008, 0x00000009, 0x0000000A,
@@ -61,18 +62,22 @@ static void setPalm(float deltaTime, int index) {
     palm->setActive(true);
     
     // Read controller buttons and joystick into the hand
-    if (!Application::getInstance()->getJoystickManager()->getJoystickStates().isEmpty()) {
-        const JoystickState& state = Application::getInstance()->getJoystickManager()->getJoystickStates().at(0);
-        if (state.axes.size() >= 4 && state.buttons.size() >= 4) {
+    const QString PRIO_JOYSTICK_NAME = "PrioVR";
+    Joystick* prioJoystick = JoystickScriptingInterface::getInstance().joystickWithName(PRIO_JOYSTICK_NAME);
+    if (prioJoystick) {
+        const QVector<float> axes = prioJoystick->getAxes();
+        const QVector<bool> buttons = prioJoystick->getButtons();
+        
+        if (axes.size() >= 4 && buttons.size() >= 4) {
             if (index == LEFT_HAND_INDEX) {
-                palm->setControllerButtons(state.buttons.at(1) ? BUTTON_FWD : 0);
-                palm->setTrigger(state.buttons.at(0) ? 1.0f : 0.0f);
-                palm->setJoystick(state.axes.at(0), -state.axes.at(1));
+                palm->setControllerButtons(buttons[1] ? BUTTON_FWD : 0);
+                palm->setTrigger(buttons[0] ? 1.0f : 0.0f);
+                palm->setJoystick(axes[0], -axes[1]);
                 
             } else {
-                palm->setControllerButtons(state.buttons.at(3) ? BUTTON_FWD : 0);
-                palm->setTrigger(state.buttons.at(2) ? 1.0f : 0.0f);
-                palm->setJoystick(state.axes.at(2), -state.axes.at(3)); 
+                palm->setControllerButtons(buttons[3] ? BUTTON_FWD : 0);
+                palm->setTrigger(buttons[2] ? 1.0f : 0.0f);
+                palm->setJoystick(axes[2], -axes[3]);
             }
         }
     }
@@ -101,7 +106,7 @@ static void setPalm(float deltaTime, int index) {
     
     //  Compute current velocity from position change
     glm::vec3 rawVelocity;
-    if (deltaTime > 0.f) {
+    if (deltaTime > 0.0f) {
         rawVelocity = (position - palm->getRawPosition()) / deltaTime; 
     } else {
         rawVelocity = glm::vec3(0.0f);
@@ -114,10 +119,10 @@ static void setPalm(float deltaTime, int index) {
     const glm::vec3 FINGER_VECTOR(0.0f, 0.0f, FINGER_LENGTH);
     const glm::vec3 newTipPosition = position + rotation * FINGER_VECTOR;
     glm::vec3 oldTipPosition = palm->getTipRawPosition();
-    if (deltaTime > 0.f) {
+    if (deltaTime > 0.0f) {
         palm->setTipVelocity((newTipPosition - oldTipPosition) / deltaTime);
     } else {
-        palm->setTipVelocity(glm::vec3(0.f));
+        palm->setTipVelocity(glm::vec3(0.0f));
     }
     palm->setTipPosition(newTipPosition);
 }
@@ -207,10 +212,12 @@ void PrioVR::renderCalibrationCountdown() {
         Application::getInstance()->disconnect(this);
         return;
     }
-    static TextRenderer textRenderer(MONO_FONT_FAMILY, 18, QFont::Bold, false, TextRenderer::OUTLINE_EFFECT, 2);
+    static TextRenderer* textRenderer = TextRenderer::getInstance(MONO_FONT_FAMILY, 18, QFont::Bold,
+        false, TextRenderer::OUTLINE_EFFECT, 2);
     QByteArray text = "Assume T-Pose in " + QByteArray::number(secondsRemaining) + "...";
-    textRenderer.draw((Application::getInstance()->getGLWidget()->width() - textRenderer.computeWidth(text.constData())) / 2,
-        Application::getInstance()->getGLWidget()->height() / 2,
-        text);
+    auto glCanvas = DependencyManager::get<GLCanvas>();
+    textRenderer->draw((glCanvas->width() - textRenderer->computeWidth(text.constData())) / 2,
+                       glCanvas->height() / 2,
+                       text, glm::vec4(1,1,1,1));
 #endif  
 }

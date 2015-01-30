@@ -18,11 +18,16 @@
 #include <QVariant>
 #include <QVector>
 
-#include <Shape.h>
+#include <Extents.h>
+#include <Transform.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <model/Geometry.h>
+#include <model/Material.h>
+
+class QIODevice;
 class FBXNode;
 
 typedef QList<FBXNode> FBXNodeList;
@@ -34,31 +39,6 @@ extern const int NUM_FACESHIFT_BLENDSHAPES;
 
 /// The names of the joints in the Maya HumanIK rig, terminated with an empty string.
 extern const char* HUMANIK_JOINTS[];
-
-class Extents {
-public:
-    /// set minimum and maximum to FLT_MAX and -FLT_MAX respectively
-    void reset();
-
-    /// \param extents another intance of extents
-    /// expand current limits to contain other extents
-    void addExtents(const Extents& extents);
-
-    /// \param point new point to compare against existing limits
-    /// compare point to current limits and expand them if necessary to contain point
-    void addPoint(const glm::vec3& point);
-
-    /// \param point
-    /// \return true if point is within current limits
-    bool containsPoint(const glm::vec3& point) const;
-
-    /// \return whether or not the extents are empty
-    bool isEmpty() const { return minimum == maximum; }
-    bool isValid() const { return !((minimum == glm::vec3(FLT_MAX)) && (maximum == glm::vec3(-FLT_MAX))); }
-
-    glm::vec3 minimum;
-    glm::vec3 maximum;
-};
 
 /// A node within an FBX document.
 class FBXNode {
@@ -76,6 +56,12 @@ public:
     QVector<int> indices;
     QVector<glm::vec3> vertices;
     QVector<glm::vec3> normals;
+};
+
+enum ShapeType {
+    SHAPE_TYPE_SPHERE = 0,
+    SHAPE_TYPE_CAPSULE = 1,
+    SHAPE_TYPE_UNKNOWN = 2
 };
 
 /// A single joint (transformation node) extracted from an FBX document.
@@ -102,7 +88,8 @@ public:
     QString name;
     glm::vec3 shapePosition;  // in joint frame
     glm::quat shapeRotation;  // in joint frame
-    Shape::Type shapeType;
+    ShapeType shapeType;
+    bool isSkeletonJoint;
 };
 
 
@@ -117,9 +104,13 @@ public:
 /// A texture map in an FBX document.
 class FBXTexture {
 public:
-    
+    QString name;
     QByteArray filename;
     QByteArray content;
+    
+    Transform transform;
+    int texcoordSet;
+    QString texcoordSetName;
 };
 
 /// A single part of a mesh (with the same material).
@@ -131,11 +122,18 @@ public:
     
     glm::vec3 diffuseColor;
     glm::vec3 specularColor;
+    glm::vec3 emissiveColor;
+    glm::vec2 emissiveParams;
     float shininess;
+    float opacity;
     
     FBXTexture diffuseTexture;
     FBXTexture normalTexture;
     FBXTexture specularTexture;
+    FBXTexture emissiveTexture;
+
+    QString materialID;
+    model::MaterialPointer _material;
 };
 
 /// A single mesh (with optional blendshapes) extracted from an FBX document.
@@ -149,18 +147,23 @@ public:
     QVector<glm::vec3> tangents;
     QVector<glm::vec3> colors;
     QVector<glm::vec2> texCoords;
+    QVector<glm::vec2> texCoords1;
     QVector<glm::vec4> clusterIndices;
     QVector<glm::vec4> clusterWeights;
     
     QVector<FBXCluster> clusters;
 
     Extents meshExtents;
-    
+    glm::mat4 modelTransform;
+
     bool isEye;
     
     QVector<FBXBlendshape> blendshapes;
     
     bool hasSpecularTexture() const;
+    bool hasEmissiveTexture() const;
+
+    model::Mesh _mesh;
 };
 
 /// A single animation frame extracted from an FBX document.
@@ -168,6 +171,22 @@ class FBXAnimationFrame {
 public:
     
     QVector<glm::quat> rotations;
+};
+
+/// A light in an FBX document.
+class FBXLight {
+public:
+    QString name;
+    Transform transform;
+    float intensity;
+    glm::vec3 color;
+
+    FBXLight() :
+        name(),
+        transform(),
+        intensity(1.0f),
+        color(1.0f)
+    {}
 };
 
 Q_DECLARE_METATYPE(FBXAnimationFrame)
@@ -201,19 +220,22 @@ public:
 
     QVector<FBXJoint> joints;
     QHash<QString, int> jointIndices; ///< 1-based, so as to more easily detect missing indices
+    bool hasSkeletonJoints;
     
     QVector<FBXMesh> meshes;
     
     glm::mat4 offset;
     
-    int leftEyeJointIndex;
-    int rightEyeJointIndex;
-    int neckJointIndex;
-    int rootJointIndex;
-    int leanJointIndex;
-    int headJointIndex;
-    int leftHandJointIndex;
-    int rightHandJointIndex;
+    int leftEyeJointIndex = -1;
+    int rightEyeJointIndex = -1;
+    int neckJointIndex = -1;
+    int rootJointIndex = -1;
+    int leanJointIndex = -1;
+    int headJointIndex = -1;
+    int leftHandJointIndex = -1;
+    int rightHandJointIndex = -1;
+    int leftToeJointIndex = -1;
+    int rightToeJointIndex = -1;
     
     QVector<int> humanIKJointIndices;
     
@@ -234,6 +256,15 @@ public:
     QStringList getJointNames() const;
     
     bool hasBlendedMeshes() const;
+
+    /// Returns the unscaled extents of the model's mesh
+    Extents getUnscaledMeshExtents() const;
+
+
+    QHash<int, QString> meshIndicesToModelNames;
+    
+    /// given a meshIndex this will return the name of the model that mesh belongs to if known
+    QString getModelNameOfMesh(int meshIndex) const;
 };
 
 Q_DECLARE_METATYPE(FBXGeometry)
@@ -246,11 +277,10 @@ QByteArray writeMapping(const QVariantHash& mapping);
 
 /// Reads FBX geometry from the supplied model and mapping data.
 /// \exception QString if an error occurs in parsing
-FBXGeometry readFBX(const QByteArray& model, const QVariantHash& mapping);
+FBXGeometry readFBX(const QByteArray& model, const QVariantHash& mapping, bool loadLightmaps = true, float lightmapLevel = 1.0f);
 
-/// Reads SVO geometry from the supplied model data.
-FBXGeometry readSVO(const QByteArray& model);
-
-void calculateRotatedExtents(Extents& extents, const glm::quat& rotation);
+/// Reads FBX geometry from the supplied model and mapping data.
+/// \exception QString if an error occurs in parsing
+FBXGeometry readFBX(QIODevice* device, const QVariantHash& mapping, bool loadLightmaps = true, float lightmapLevel = 1.0f);
 
 #endif // hifi_FBXReader_h

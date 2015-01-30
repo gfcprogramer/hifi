@@ -39,8 +39,8 @@ public slots:
     void wentTo(QString destinationType, QString destinationName);
     
 private slots:
-    void requestFinished(const QJsonObject& object);
-    void requestError(QNetworkReply::NetworkError error,const QString& string);
+    void requestFinished(QNetworkReply& requestReply);
+    void requestError(QNetworkReply& errorReply);
     
 private:
     UserActivityLogger();

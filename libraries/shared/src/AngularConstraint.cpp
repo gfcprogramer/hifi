@@ -12,7 +12,7 @@
 #include <glm/gtx/norm.hpp>
 
 #include "AngularConstraint.h"
-#include "SharedUtil.h"
+#include "GLMHelpers.h"
 
 // helper function
 /// \param angle radian angle to be clamped within angleMin and angleMax

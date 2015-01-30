@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 #include <iterator>
+#include <assert.h>
 
 #ifndef _WIN32
 #include <unistd.h> // not on windows, not needed for mac or windows
@@ -22,10 +23,11 @@
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QMutex>
 #include <QtCore/QSet>
-#include <QtCore/QSettings>
 #include <QtCore/QSharedPointer>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QUdpSocket>
+
+#include <DependencyManager.h>
 
 #include "DomainHandler.h"
 #include "LimitedNodeList.h"
@@ -37,19 +39,11 @@ const int MAX_SILENT_DOMAIN_SERVER_CHECK_INS = 5;
 
 class Assignment;
 
-typedef quint8 PingType_t;
-namespace PingType {
-    const PingType_t Agnostic = 0;
-    const PingType_t Local = 1;
-    const PingType_t Public = 2;
-    const PingType_t Symmetric = 3;
-}
-
 class NodeList : public LimitedNodeList {
     Q_OBJECT
+    SINGLETON_DEPENDENCY
+    
 public:
-    static NodeList* createInstance(char ownerType, unsigned short socketListenPort = 0, unsigned short dtlsPort = 0);
-    static NodeList* getInstance();
     NodeType_t getOwnerType() const { return _ownerType; }
     void setOwnerType(NodeType_t ownerType) { _ownerType = ownerType; }
 
@@ -69,14 +63,8 @@ public:
 
     void setAssignmentServerSocket(const HifiSockAddr& serverSocket) { _assignmentServerSocket = serverSocket; }
     void sendAssignment(Assignment& assignment);
-
-    QByteArray constructPingPacket(PingType_t pingType = PingType::Agnostic);
-    QByteArray constructPingReplyPacket(const QByteArray& pingPacket);
     
     void pingPunchForInactiveNode(const SharedNodePointer& node);
-    
-    void loadData(QSettings* settings);
-    void saveData(QSettings* settings);
 public slots:
     void reset();
     void sendDomainServerCheckIn();
@@ -84,13 +72,15 @@ public slots:
 signals:
     void limitOfSilentDomainCheckInsReached();
 private:
-    static NodeList* _sharedInstance;
-
-    NodeList(char ownerType, unsigned short socketListenPort, unsigned short dtlsListenPort);
+    NodeList() : LimitedNodeList(0, 0) { assert(false); } // Not implemented, needed for DependencyManager templates compile
+    NodeList(char ownerType, unsigned short socketListenPort = 0, unsigned short dtlsListenPort = 0);
     NodeList(NodeList const&); // Don't implement, needed to avoid copies of singleton
     void operator=(NodeList const&); // Don't implement, needed to avoid copies of singleton
+    
     void sendSTUNRequest();
-    void processSTUNResponse(const QByteArray& packet);
+    bool processSTUNResponse(const QByteArray& packet);
+    
+    void handleICEConnectionToDomainServer();
     
     void processDomainServerAuthRequest(const QByteArray& packet);
     void requestAuthForDomainServer();
@@ -102,7 +92,6 @@ private:
     DomainHandler _domainHandler;
     int _numNoReplyDomainCheckIns;
     HifiSockAddr _assignmentServerSocket;
-    HifiSockAddr _publicSockAddr;
     bool _hasCompletedInitialSTUNFailure;
     unsigned int _stunRequestsSinceSuccess;
 };

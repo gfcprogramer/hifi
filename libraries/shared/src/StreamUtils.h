@@ -49,7 +49,9 @@ std::ostream& operator<<(std::ostream& s, const CapsuleShape& capsule);
 #ifndef QT_NO_DEBUG_STREAM
 class QDebug;
 // Add support for writing these to qDebug().
+QDebug& operator<<(QDebug& s, const glm::vec2& v);
 QDebug& operator<<(QDebug& s, const glm::vec3& v);
+QDebug& operator<<(QDebug& s, const glm::vec4& v);
 QDebug& operator<<(QDebug& s, const glm::quat& q);
 QDebug& operator<<(QDebug& s, const glm::mat4& m);
 #endif // QT_NO_DEBUG_STREAM

@@ -20,9 +20,10 @@
 
 #include "Application.h"
 #include "AttachmentsDialog.h"
+#include "MainWindow.h"
 
-AttachmentsDialog::AttachmentsDialog() :
-    QDialog(Application::getInstance()->getWindow()) {
+AttachmentsDialog::AttachmentsDialog(QWidget* parent) :
+    QDialog(parent) {
     
     setWindowTitle("Edit Attachments");
     setAttribute(Qt::WA_DeleteOnClose);

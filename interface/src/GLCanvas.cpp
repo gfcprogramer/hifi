@@ -9,17 +9,18 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
-#include "Application.h"
-
-#include "GLCanvas.h"
-#include "devices/OculusManager.h"
 #include <QMimeData>
 #include <QUrl>
-#include <QMainWindow>
+#include <QWindow>
+
+#include "Application.h"
+#include "GLCanvas.h"
+#include "MainWindow.h"
+#include "devices/OculusManager.h"
 
 const int MSECS_PER_FRAME_WHEN_THROTTLED = 66;
 
-GLCanvas::GLCanvas() : QGLWidget(QGLFormat(QGL::NoDepthBuffer)),
+GLCanvas::GLCanvas() : QGLWidget(QGL::NoDepthBuffer | QGL::NoStencilBuffer),
     _throttleRendering(false),
     _idleRenderInterval(MSECS_PER_FRAME_WHEN_THROTTLED)
 {
@@ -32,6 +33,14 @@ GLCanvas::GLCanvas() : QGLWidget(QGLFormat(QGL::NoDepthBuffer)),
 
 bool GLCanvas::isThrottleRendering() const {
     return _throttleRendering || Application::getInstance()->getWindow()->isMinimized();
+}
+
+int GLCanvas::getDeviceWidth() const {
+    return width() * (windowHandle() ? windowHandle()->devicePixelRatio() : 1.0f);
+}
+
+int GLCanvas::getDeviceHeight() const {
+    return height() * (windowHandle() ? windowHandle()->devicePixelRatio() : 1.0f);
 }
 
 void GLCanvas::initializeGL() {

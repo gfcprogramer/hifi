@@ -9,23 +9,32 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
+#include <QFileDialog>
+
+#include <devices/Faceshift.h>
+#include <devices/SixenseManager.h>
 
 #include "Application.h"
+#include "Audio.h"
+#include "MainWindow.h"
 #include "Menu.h"
 #include "ModelsBrowser.h"
 #include "PreferencesDialog.h"
+#include "Snapshot.h"
 #include "UserActivityLogger.h"
 
-const int SCROLL_PANEL_BOTTOM_MARGIN = 30;
-const int OK_BUTTON_RIGHT_MARGIN = 30;
-const int BUTTONS_TOP_MARGIN = 24;
+const int PREFERENCES_HEIGHT_PADDING = 20;
 
-PreferencesDialog::PreferencesDialog(QWidget* parent, Qt::WindowFlags flags) : FramelessDialog(parent, flags, POSITION_LEFT) {
+PreferencesDialog::PreferencesDialog(QWidget* parent) :
+    QDialog(parent) {
+        
+    setAttribute(Qt::WA_DeleteOnClose);
 
     ui.setupUi(this);
-    setStyleSheetFile("styles/preferences.qss");
     loadPreferences();
-    connect(ui.closeButton, &QPushButton::clicked, this, &QDialog::close);
+
+    ui.outputBufferSizeSpinner->setMinimum(MIN_AUDIO_OUTPUT_BUFFER_SIZE_FRAMES);
+    ui.outputBufferSizeSpinner->setMaximum(MAX_AUDIO_OUTPUT_BUFFER_SIZE_FRAMES);
 
     connect(ui.buttonBrowseHead, &QPushButton::clicked, this, &PreferencesDialog::openHeadModelBrowser);
     connect(ui.buttonBrowseBody, &QPushButton::clicked, this, &PreferencesDialog::openBodyModelBrowser);
@@ -33,6 +42,9 @@ PreferencesDialog::PreferencesDialog(QWidget* parent, Qt::WindowFlags flags) : F
     connect(ui.buttonBrowseScriptsLocation, &QPushButton::clicked, this, &PreferencesDialog::openScriptsLocationBrowser);
     connect(ui.buttonReloadDefaultScripts, &QPushButton::clicked,
             Application::getInstance(), &Application::loadDefaultScripts);
+    // move dialog to left side
+    move(parentWidget()->geometry().topLeft());
+    setFixedHeight(parentWidget()->size().height() - PREFERENCES_HEIGHT_PADDING);
 }
 
 void PreferencesDialog::accept() {
@@ -49,78 +61,48 @@ void PreferencesDialog::setSkeletonUrl(QString modelUrl) {
 }
 
 void PreferencesDialog::openHeadModelBrowser() {
-    setWindowFlags(windowFlags() & ~Qt::WindowStaysOnTopHint);
-    show();
-
     ModelsBrowser modelBrowser(HEAD_MODEL);
     connect(&modelBrowser, &ModelsBrowser::selected, this, &PreferencesDialog::setHeadUrl);
     modelBrowser.browse();
-
-    setWindowFlags(windowFlags() | Qt::WindowStaysOnTopHint);
-    show();
 }
 
 void PreferencesDialog::openBodyModelBrowser() {
-    setWindowFlags(windowFlags() & ~Qt::WindowStaysOnTopHint);
-    show();
-
     ModelsBrowser modelBrowser(SKELETON_MODEL);
     connect(&modelBrowser, &ModelsBrowser::selected, this, &PreferencesDialog::setSkeletonUrl);
     modelBrowser.browse();
-
-    setWindowFlags(windowFlags() | Qt::WindowStaysOnTopHint);
-    show();
 }
 
 void PreferencesDialog::openSnapshotLocationBrowser() {
-    setWindowFlags(windowFlags() & ~Qt::WindowStaysOnTopHint);
-    show();
-
     QString dir = QFileDialog::getExistingDirectory(this, tr("Snapshots Location"),
                                                     QStandardPaths::writableLocation(QStandardPaths::DesktopLocation),
                                                     QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (!dir.isNull() && !dir.isEmpty()) {
         ui.snapshotLocationEdit->setText(dir);
     }
-
-    setWindowFlags(windowFlags() | Qt::WindowStaysOnTopHint);
-    show();
 }
 
 void PreferencesDialog::openScriptsLocationBrowser() {
-    setWindowFlags(windowFlags() & ~Qt::WindowStaysOnTopHint);
-    show();
-
     QString dir = QFileDialog::getExistingDirectory(this, tr("Scripts Location"),
                                                     ui.scriptsLocationEdit->text(),
                                                     QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (!dir.isNull() && !dir.isEmpty()) {
         ui.scriptsLocationEdit->setText(dir);
     }
-
-    setWindowFlags(windowFlags() | Qt::WindowStaysOnTopHint);
-    show();
 }
 
 void PreferencesDialog::resizeEvent(QResizeEvent *resizeEvent) {
-
+    
     // keep buttons panel at the bottom
-    ui.buttonsPanel->setGeometry(0, size().height() - ui.buttonsPanel->height(), size().width(), ui.buttonsPanel->height());
-
+    ui.buttonsPanel->setGeometry(0,
+                                 size().height() - ui.buttonsPanel->height(),
+                                 size().width(),
+                                 ui.buttonsPanel->height());
+    
     // set width and height of srcollarea to match bottom panel and width
     ui.scrollArea->setGeometry(ui.scrollArea->geometry().x(), ui.scrollArea->geometry().y(),
                                size().width(),
-                               size().height() - ui.buttonsPanel->height() -
-                               SCROLL_PANEL_BOTTOM_MARGIN - ui.scrollArea->geometry().y());
-
-    // move Save button to left position
-    ui.defaultButton->move(size().width() - OK_BUTTON_RIGHT_MARGIN - ui.defaultButton->size().width(), BUTTONS_TOP_MARGIN);
-
-    // move Save button to left position
-    ui.cancelButton->move(ui.defaultButton->pos().x() - ui.cancelButton->size().width(), BUTTONS_TOP_MARGIN);
-
-    // move close button
-    ui.closeButton->move(size().width() - OK_BUTTON_RIGHT_MARGIN - ui.closeButton->size().width(), ui.closeButton->pos().y());
+                               size().height() - ui.buttonsPanel->height() - ui.scrollArea->geometry().y());
+    
 }
 
 void PreferencesDialog::loadPreferences() {
@@ -139,35 +121,53 @@ void PreferencesDialog::loadPreferences() {
     
     ui.sendDataCheckBox->setChecked(!menuInstance->isOptionChecked(MenuOption::DisableActivityLogger));
 
-    ui.snapshotLocationEdit->setText(menuInstance->getSnapshotsLocation());
+    ui.snapshotLocationEdit->setText(SettingHandles::snapshotsLocation.get());
 
-    ui.scriptsLocationEdit->setText(menuInstance->getScriptsLocation());
+    ui.scriptsLocationEdit->setText(qApp->getScriptsLocation());
 
     ui.pupilDilationSlider->setValue(myAvatar->getHead()->getPupilDilation() *
                                      ui.pupilDilationSlider->maximum());
     
-    ui.faceshiftEyeDeflectionSider->setValue(menuInstance->getFaceshiftEyeDeflection() *
+    auto faceshift = DependencyManager::get<Faceshift>();
+    ui.faceshiftEyeDeflectionSider->setValue(faceshift->getEyeDeflection() *
                                              ui.faceshiftEyeDeflectionSider->maximum());
     
-    ui.audioJitterSpin->setValue(menuInstance->getAudioJitterBufferSamples());
+    ui.faceshiftHostnameEdit->setText(faceshift->getHostname());
+    
+    auto audio = DependencyManager::get<Audio>();
+    MixedProcessedAudioStream& stream = audio->getReceivedAudioStream();
 
-    ui.realWorldFieldOfViewSpin->setValue(menuInstance->getRealWorldFieldOfView());
+    ui.dynamicJitterBuffersCheckBox->setChecked(stream.getDynamicJitterBuffers());
+    ui.staticDesiredJitterBufferFramesSpin->setValue(stream.getDesiredJitterBufferFrames());
+    ui.maxFramesOverDesiredSpin->setValue(stream.getMaxFramesOverDesired());
+    ui.useStdevForJitterCalcCheckBox->setChecked(stream.getUseStDevForJitterCalc());
+    ui.windowStarveThresholdSpin->setValue(stream.getWindowStarveThreshold());
+    ui.windowSecondsForDesiredCalcOnTooManyStarvesSpin->setValue(
+            stream.getWindowSecondsForDesiredCalcOnTooManyStarves());
+    ui.windowSecondsForDesiredReductionSpin->setValue(stream.getWindowSecondsForDesiredReduction());
+    ui.repetitionWithFadeCheckBox->setChecked(stream.getRepetitionWithFade());
 
-    ui.fieldOfViewSpin->setValue(menuInstance->getFieldOfView());
+    ui.outputBufferSizeSpinner->setValue(audio->getOutputBufferSize());
+
+    ui.outputStarveDetectionCheckBox->setChecked(audio->getOutputStarveDetectionEnabled());
+    ui.outputStarveDetectionThresholdSpinner->setValue(audio->getOutputStarveDetectionThreshold());
+    ui.outputStarveDetectionPeriodSpinner->setValue(audio->getOutputStarveDetectionPeriod());
+
+    ui.realWorldFieldOfViewSpin->setValue(qApp->getViewFrustum()->getRealWorldFieldOfView());
+
+    ui.fieldOfViewSpin->setValue(qApp->getViewFrustum()->getFieldOfView());
     
     ui.leanScaleSpin->setValue(myAvatar->getLeanScale());
     
     ui.avatarScaleSpin->setValue(myAvatar->getScale());
     
-    ui.maxVoxelsSpin->setValue(menuInstance->getMaxVoxels());
-    
-    ui.maxVoxelsPPSSpin->setValue(menuInstance->getMaxVoxelPacketsPerSecond());
+    ui.maxOctreePPSSpin->setValue(qApp->getOctreeQuery().getMaxOctreePacketsPerSecond());
 
-    ui.oculusUIAngularSizeSpin->setValue(menuInstance->getOculusUIAngularSize());
+    ui.oculusUIAngularSizeSpin->setValue(qApp->getApplicationOverlay().getOculusUIAngularSize());
 
-    ui.sixenseReticleMoveSpeedSpin->setValue(menuInstance->getSixenseReticleMoveSpeed());
-
-    ui.invertSixenseButtonsCheckBox->setChecked(menuInstance->getInvertSixenseButtons());
+    SixenseManager& sixense = SixenseManager::getInstance();
+    ui.sixenseReticleMoveSpeedSpin->setValue(sixense.getReticleMoveSpeed());
+    ui.invertSixenseButtonsCheckBox->setChecked(sixense.getInvertButtons());
 
 }
 
@@ -184,24 +184,33 @@ void PreferencesDialog::savePreferences() {
     }
     
     QUrl faceModelURL(ui.faceURLEdit->text());
-    if (faceModelURL.toString() != _faceURLString) {
-        // change the faceModelURL in the profile, it will also update this user's BlendFace
-        myAvatar->setFaceModelURL(faceModelURL);
-        UserActivityLogger::getInstance().changedModel("head", faceModelURL.toString());
-        shouldDispatchIdentityPacket = true;
+    QString faceModelURLString = faceModelURL.toString();
+    if (faceModelURLString != _faceURLString) {
+        if (faceModelURLString.isEmpty() || faceModelURLString.toLower().endsWith(".fst")) {
+            // change the faceModelURL in the profile, it will also update this user's BlendFace
+            myAvatar->setFaceModelURL(faceModelURL);
+            UserActivityLogger::getInstance().changedModel("head", faceModelURLString);
+            shouldDispatchIdentityPacket = true;
+        } else {
+            qDebug() << "ERROR: Head model not FST or blank - " << faceModelURLString;
+        }
     }
 
     QUrl skeletonModelURL(ui.skeletonURLEdit->text());
-    if (skeletonModelURL.toString() != _skeletonURLString) {
-        // change the skeletonModelURL in the profile, it will also update this user's Body
-        myAvatar->setSkeletonModelURL(skeletonModelURL);
-        UserActivityLogger::getInstance().changedModel("skeleton", skeletonModelURL.toString());
-        shouldDispatchIdentityPacket = true;
+    QString skeletonModelURLString = skeletonModelURL.toString();
+    if (skeletonModelURLString != _skeletonURLString) {
+        if (skeletonModelURLString.isEmpty() || skeletonModelURLString.toLower().endsWith(".fst")) {
+            // change the skeletonModelURL in the profile, it will also update this user's Body
+            myAvatar->setSkeletonModelURL(skeletonModelURL);
+            UserActivityLogger::getInstance().changedModel("skeleton", skeletonModelURLString);
+            shouldDispatchIdentityPacket = true;
+        } else {
+            qDebug() << "ERROR: Skeleton model not FST or blank - " << skeletonModelURLString;
+        }
     }
     
     if (shouldDispatchIdentityPacket) {
         myAvatar->sendIdentityPacket();
-        Application::getInstance()->bumpSettings();
     }
     
     if (!Menu::getInstance()->isOptionChecked(MenuOption::DisableActivityLogger)
@@ -210,38 +219,55 @@ void PreferencesDialog::savePreferences() {
     }
 
     if (!ui.snapshotLocationEdit->text().isEmpty() && QDir(ui.snapshotLocationEdit->text()).exists()) {
-        Menu::getInstance()->setSnapshotsLocation(ui.snapshotLocationEdit->text());
+        SettingHandles::snapshotsLocation.set(ui.snapshotLocationEdit->text());
     }
 
     if (!ui.scriptsLocationEdit->text().isEmpty() && QDir(ui.scriptsLocationEdit->text()).exists()) {
-        Menu::getInstance()->setScriptsLocation(ui.scriptsLocationEdit->text());
+        qApp->setScriptsLocation(ui.scriptsLocationEdit->text());
     }
 
     myAvatar->getHead()->setPupilDilation(ui.pupilDilationSlider->value() / (float)ui.pupilDilationSlider->maximum());
     myAvatar->setLeanScale(ui.leanScaleSpin->value());
     myAvatar->setClampedTargetScale(ui.avatarScaleSpin->value());
     
-    Application::getInstance()->getVoxels()->setMaxVoxels(ui.maxVoxelsSpin->value());
-    Application::getInstance()->resizeGL(Application::getInstance()->getGLWidget()->width(),
-                                         Application::getInstance()->getGLWidget()->height());
+    auto glCanvas = DependencyManager::get<GLCanvas>();
+    Application::getInstance()->resizeGL(glCanvas->width(), glCanvas->height());
 
-    Menu::getInstance()->setRealWorldFieldOfView(ui.realWorldFieldOfViewSpin->value());
+    qApp->getViewFrustum()->setRealWorldFieldOfView(ui.realWorldFieldOfViewSpin->value());
     
-    Menu::getInstance()->setFieldOfView(ui.fieldOfViewSpin->value());
+    qApp->getViewFrustum()->setFieldOfView(ui.fieldOfViewSpin->value());
+    
+    auto faceshift = DependencyManager::get<Faceshift>();
+    faceshift->setEyeDeflection(ui.faceshiftEyeDeflectionSider->value() /
+                                (float)ui.faceshiftEyeDeflectionSider->maximum());
+    
+    faceshift->setHostname(ui.faceshiftHostnameEdit->text());
+    
+    qApp->getOctreeQuery().setMaxOctreePacketsPerSecond(ui.maxOctreePPSSpin->value());
 
-    Menu::getInstance()->setFaceshiftEyeDeflection(ui.faceshiftEyeDeflectionSider->value() /
-                                                     (float)ui.faceshiftEyeDeflectionSider->maximum());
-    Menu::getInstance()->setMaxVoxelPacketsPerSecond(ui.maxVoxelsPPSSpin->value());
+    qApp->getApplicationOverlay().setOculusUIAngularSize(ui.oculusUIAngularSizeSpin->value());
+    
+    SixenseManager& sixense = SixenseManager::getInstance();
+    sixense.setReticleMoveSpeed(ui.sixenseReticleMoveSpeedSpin->value());
+    sixense.setInvertButtons(ui.invertSixenseButtonsCheckBox->isChecked());
 
-    Menu::getInstance()->setOculusUIAngularSize(ui.oculusUIAngularSizeSpin->value());
+    auto audio = DependencyManager::get<Audio>();
+    MixedProcessedAudioStream& stream = audio->getReceivedAudioStream();
+    
+    stream.setDynamicJitterBuffers(ui.dynamicJitterBuffersCheckBox->isChecked());
+    stream.setStaticDesiredJitterBufferFrames(ui.staticDesiredJitterBufferFramesSpin->value());
+    stream.setMaxFramesOverDesired(ui.maxFramesOverDesiredSpin->value());
+    stream.setUseStDevForJitterCalc(ui.useStdevForJitterCalcCheckBox->isChecked());
+    stream.setWindowStarveThreshold(ui.windowStarveThresholdSpin->value());
+    stream.setWindowSecondsForDesiredCalcOnTooManyStarves(ui.windowSecondsForDesiredCalcOnTooManyStarvesSpin->value());
+    stream.setWindowSecondsForDesiredReduction(ui.windowSecondsForDesiredReductionSpin->value());
+    stream.setRepetitionWithFade(ui.repetitionWithFadeCheckBox->isChecked());
 
-    Menu::getInstance()->setSixenseReticleMoveSpeed(ui.sixenseReticleMoveSpeedSpin->value());
+    QMetaObject::invokeMethod(audio.data(), "setOutputBufferSize", Q_ARG(int, ui.outputBufferSizeSpinner->value()));
 
-    Menu::getInstance()->setInvertSixenseButtons(ui.invertSixenseButtonsCheckBox->isChecked());
+    audio->setOutputStarveDetectionEnabled(ui.outputStarveDetectionCheckBox->isChecked());
+    audio->setOutputStarveDetectionThreshold(ui.outputStarveDetectionThresholdSpinner->value());
+    audio->setOutputStarveDetectionPeriod(ui.outputStarveDetectionPeriodSpinner->value());
 
-    Menu::getInstance()->setAudioJitterBufferSamples(ui.audioJitterSpin->value());
-    Application::getInstance()->getAudio()->setJitterBufferSamples(ui.audioJitterSpin->value());
-
-    Application::getInstance()->resizeGL(Application::getInstance()->getGLWidget()->width(),
-                                         Application::getInstance()->getGLWidget()->height());
+    Application::getInstance()->resizeGL(glCanvas->width(), glCanvas->height());
 }

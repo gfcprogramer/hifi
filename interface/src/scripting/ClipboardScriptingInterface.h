@@ -12,7 +12,6 @@
 #define hifi_ClipboardScriptingInterface_h
 
 #include <QObject>
-#include <VoxelDetail.h>
 
 class ClipboardScriptingInterface : public QObject {
     Q_OBJECT
@@ -23,25 +22,9 @@ signals:
     void readyToImport();
     
 public slots:
-    void cutVoxel(const VoxelDetail& sourceVoxel);
-    void cutVoxel(float x, float y, float z, float s);
-
-    void copyVoxel(const VoxelDetail& sourceVoxel);
-    void copyVoxel(float x, float y, float z, float s);
-
-    void pasteVoxel(const VoxelDetail& destinationVoxel);
-    void pasteVoxel(float x, float y, float z, float s);
-
-    void deleteVoxel(const VoxelDetail& sourceVoxel);
-    void deleteVoxel(float x, float y, float z, float s);
-
-    void exportVoxel(const VoxelDetail& sourceVoxel);
-    void exportVoxel(float x, float y, float z, float s);
-
-    bool importVoxels();
-
-    void nudgeVoxel(const VoxelDetail& sourceVoxel, const glm::vec3& nudgeVec);
-    void nudgeVoxel(float x, float y, float z, float s, const glm::vec3& nudgeVec);
+    bool importEntities(const QString& filename);
+    bool exportEntities(const QString& filename, float x, float y, float z, float s);
+    void pasteEntities(float x, float y, float z, float s);
 };
 
 #endif // hifi_ClipboardScriptingInterface_h

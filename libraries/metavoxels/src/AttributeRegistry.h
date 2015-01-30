@@ -13,10 +13,12 @@
 #define hifi_AttributeRegistry_h
 
 #include <QHash>
+#include <QMutex>
 #include <QObject>
 #include <QReadWriteLock>
 #include <QSharedPointer>
 #include <QString>
+#include <QUrl>
 #include <QWidget>
 
 #include "Bitstream.h"
@@ -27,6 +29,7 @@ class QScriptEngine;
 class QScriptValue;
 
 class Attribute;
+class DataBlock;
 class MetavoxelData;
 class MetavoxelLOD;
 class MetavoxelNode;
@@ -73,23 +76,11 @@ public:
     /// Returns a reference to the standard SharedObjectPointer "guide" attribute.
     const AttributePointer& getGuideAttribute() const { return _guideAttribute; }
     
+    /// Returns a reference to the standard SharedObjectPointer "renderer" attribute.
+    const AttributePointer& getRendererAttribute() const { return _rendererAttribute; }
+    
     /// Returns a reference to the standard SharedObjectSet "spanners" attribute.
     const AttributePointer& getSpannersAttribute() const { return _spannersAttribute; }
-    
-    /// Returns a reference to the standard QRgb "color" attribute.
-    const AttributePointer& getColorAttribute() const { return _colorAttribute; }
-    
-    /// Returns a reference to the standard packed normal "normal" attribute.
-    const AttributePointer& getNormalAttribute() const { return _normalAttribute; }
-    
-    /// Returns a reference to the standard QRgb "spannerColor" attribute.
-    const AttributePointer& getSpannerColorAttribute() const { return _spannerColorAttribute; }
-    
-    /// Returns a reference to the standard packed normal "spannerNormal" attribute.
-    const AttributePointer& getSpannerNormalAttribute() const { return _spannerNormalAttribute; }
-    
-    /// Returns a reference to the standard "spannerMask" attribute.
-    const AttributePointer& getSpannerMaskAttribute() const { return _spannerMaskAttribute; }
     
 private:
 
@@ -99,12 +90,8 @@ private:
     QReadWriteLock _attributesLock;
     
     AttributePointer _guideAttribute;
+    AttributePointer _rendererAttribute;
     AttributePointer _spannersAttribute;
-    AttributePointer _colorAttribute;
-    AttributePointer _normalAttribute;
-    AttributePointer _spannerColorAttribute;
-    AttributePointer _spannerNormalAttribute;
-    AttributePointer _spannerMaskAttribute;
 };
 
 /// Converts a value to a void pointer.
@@ -184,6 +171,7 @@ Q_DECLARE_METATYPE(OwnedAttributeValue)
 class Attribute : public SharedObject {
     Q_OBJECT
     Q_PROPERTY(float lodThresholdMultiplier MEMBER _lodThresholdMultiplier)
+    Q_PROPERTY(bool userFacing MEMBER _userFacing)
     
 public:
     
@@ -197,6 +185,9 @@ public:
     float getLODThresholdMultiplier() const { return _lodThresholdMultiplier; }
     void setLODThresholdMultiplier(float multiplier) { _lodThresholdMultiplier = multiplier; }
 
+    bool isUserFacing() const { return _userFacing; }
+    void setUserFacing(bool userFacing) { _userFacing = userFacing; }
+
     void* create() const { return create(getDefaultValue()); }
     virtual void* create(void* copy) const = 0;
     virtual void destroy(void* value) const = 0;
@@ -207,6 +198,11 @@ public:
     virtual void readDelta(Bitstream& in, void*& value, void* reference, bool isLeaf) const { read(in, value, isLeaf); }
     virtual void writeDelta(Bitstream& out, void* value, void* reference, bool isLeaf) const { write(out, value, isLeaf); }
 
+    virtual void readSubdivided(MetavoxelStreamState& state, void*& value,
+        const MetavoxelStreamState& ancestorState, void* ancestorValue, bool isLeaf) const;
+    virtual void writeSubdivided(MetavoxelStreamState& state, void* value,
+        const MetavoxelStreamState& ancestorState, void* ancestorValue, bool isLeaf) const;
+    
     virtual MetavoxelNode* createMetavoxelNode(const AttributeValue& value, const MetavoxelNode* original) const;
 
     virtual void readMetavoxelRoot(MetavoxelData& data, MetavoxelStreamState& state);
@@ -224,6 +220,10 @@ public:
 
     virtual bool metavoxelRootsEqual(const MetavoxelNode& firstRoot, const MetavoxelNode& secondRoot,
         const glm::vec3& minimum, float size, const MetavoxelLOD& lod);
+
+    /// Expands the specified root, doubling its size in each dimension.
+    /// \return a new node representing the result
+    virtual MetavoxelNode* expandMetavoxelRoot(const MetavoxelNode& root);
 
     /// Merges the value of a parent and its children.
     /// \param postRead whether or not the merge is happening after a read
@@ -252,6 +252,7 @@ public:
 private:
     
     float _lodThresholdMultiplier;
+    bool _userFacing;
 };
 
 /// A simple attribute class that stores its values inline.
@@ -315,93 +316,13 @@ template<class T, int bits> inline bool SimpleInlineAttribute<T, bits>::merge(
     return allChildrenEqual;
 }
 
-/// Simple float attribute.
+/// A simple float attribute.
 class FloatAttribute : public SimpleInlineAttribute<float> {
     Q_OBJECT
-    Q_PROPERTY(float defaultValue MEMBER _defaultValue)
-
+    
 public:
     
-    Q_INVOKABLE FloatAttribute(const QString& name = QString(), float defaultValue = 0.0f);
-};
-
-/// Provides appropriate averaging for RGBA values.
-class QRgbAttribute : public InlineAttribute<QRgb> {
-    Q_OBJECT
-    Q_PROPERTY(uint defaultValue MEMBER _defaultValue)
-
-public:
-    
-    Q_INVOKABLE QRgbAttribute(const QString& name = QString(), QRgb defaultValue = QRgb());
-    
-    virtual bool merge(void*& parent, void* children[], bool postRead = false) const;
-    
-    virtual void* mix(void* first, void* second, float alpha) const;
-    
-    virtual void* blend(void* source, void* dest) const;
-    
-    virtual void* createFromScript(const QScriptValue& value, QScriptEngine* engine) const;
-    
-    virtual void* createFromVariant(const QVariant& value) const;
-    
-    virtual QWidget* createEditor(QWidget* parent = NULL) const;
-};
-
-/// Provides appropriate averaging for packed normals.
-class PackedNormalAttribute : public QRgbAttribute {
-    Q_OBJECT
-
-public:
-    
-    Q_INVOKABLE PackedNormalAttribute(const QString& name = QString(), QRgb defaultValue = QRgb());
-    
-    virtual bool merge(void*& parent, void* children[], bool postRead = false) const;
-    
-    virtual void* mix(void* first, void* second, float alpha) const;
-    
-    virtual void* blend(void* source, void* dest) const;
-};
-
-/// Packs a normal into an RGB value.
-QRgb packNormal(const glm::vec3& normal);
-
-/// Unpacks a normal from an RGB value.
-glm::vec3 unpackNormal(QRgb value);
-
-/// RGBA values for voxelized spanners.
-class SpannerQRgbAttribute : public QRgbAttribute {
-    Q_OBJECT
-
-public:
-    
-    Q_INVOKABLE SpannerQRgbAttribute(const QString& name = QString(), QRgb defaultValue = QRgb());
-    
-    virtual void read(Bitstream& in, void*& value, bool isLeaf) const;
-    virtual void write(Bitstream& out, void* value, bool isLeaf) const;
-    
-    virtual MetavoxelNode* createMetavoxelNode(const AttributeValue& value, const MetavoxelNode* original) const;
-    
-    virtual bool merge(void*& parent, void* children[], bool postRead = false) const;
-    
-    virtual AttributeValue inherit(const AttributeValue& parentValue) const;
-};
-
-/// Packed normals for voxelized spanners.
-class SpannerPackedNormalAttribute : public PackedNormalAttribute {
-    Q_OBJECT
-
-public:
-    
-    Q_INVOKABLE SpannerPackedNormalAttribute(const QString& name = QString(), QRgb defaultValue = QRgb());
-    
-    virtual void read(Bitstream& in, void*& value, bool isLeaf) const;
-    virtual void write(Bitstream& out, void* value, bool isLeaf) const;
-    
-    virtual MetavoxelNode* createMetavoxelNode(const AttributeValue& value, const MetavoxelNode* original) const;
-    
-    virtual bool merge(void*& parent, void* children[], bool postRead = false) const;
-    
-    virtual AttributeValue inherit(const AttributeValue& parentValue) const;
+    Q_INVOKABLE FloatAttribute(const QString& name = QString());
 };
 
 /// An attribute that takes the form of QObjects of a given meta-type (a subclass of SharedObject).
@@ -449,6 +370,8 @@ public:
     virtual MetavoxelNode* createMetavoxelNode(const AttributeValue& value, const MetavoxelNode* original) const;
     
     virtual bool deepEqual(void* first, void* second) const;
+    
+    virtual MetavoxelNode* expandMetavoxelRoot(const MetavoxelNode& root);
     
     virtual bool merge(void*& parent, void* children[], bool postRead = false) const;
 

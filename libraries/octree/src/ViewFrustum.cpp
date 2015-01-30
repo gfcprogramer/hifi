@@ -17,6 +17,8 @@
 
 #include <QtCore/QDebug>
 
+#include <Settings.h>
+
 #include "GeometryUtil.h"
 #include "SharedUtil.h"
 #include "ViewFrustum.h"
@@ -24,38 +26,34 @@
 
 using namespace std;
 
-ViewFrustum::ViewFrustum() :
-    _position(0,0,0),
-    _positionVoxelScale(0,0,0),
-    _orientation(),
-    _direction(IDENTITY_FRONT),
-    _up(IDENTITY_UP),
-    _right(IDENTITY_RIGHT),
-    _orthographic(false),
-    _width(1.0f),
-    _height(1.0f),
-    _fieldOfView(0.0),
-    _aspectRatio(1.0f),
-    _nearClip(0.1f),
-    _farClip(500.0f),
-    _focalLength(0.25f),
-    _keyholeRadius(DEFAULT_KEYHOLE_RADIUS),
-    _farTopLeft(0,0,0),
-    _farTopRight(0,0,0),
-    _farBottomLeft(0,0,0),
-    _farBottomRight(0,0,0),
-    _nearTopLeft(0,0,0),
-    _nearTopRight(0,0,0),
-    _nearBottomLeft(0,0,0),
-    _nearBottomRight(0,0,0)
-{
+namespace SettingHandles {
+    const SettingHandle<float> fieldOfView("fieldOfView", DEFAULT_FIELD_OF_VIEW_DEGREES);
+    const SettingHandle<float> realWorldFieldOfView("realWorldFieldOfView", DEFAULT_REAL_WORLD_FIELD_OF_VIEW_DEGREES);
+}
+
+ViewFrustum::ViewFrustum() {
+    _fieldOfView = SettingHandles::fieldOfView.get();
+    _realWorldFieldOfView = SettingHandles::realWorldFieldOfView.get();
 }
 
 void ViewFrustum::setOrientation(const glm::quat& orientationAsQuaternion) {
     _orientation = orientationAsQuaternion;
-    _right       = glm::vec3(orientationAsQuaternion * glm::vec4(IDENTITY_RIGHT, 0.0f));
-    _up          = glm::vec3(orientationAsQuaternion * glm::vec4(IDENTITY_UP,    0.0f));
-    _direction   = glm::vec3(orientationAsQuaternion * glm::vec4(IDENTITY_FRONT, 0.0f));
+    _right = glm::vec3(orientationAsQuaternion * glm::vec4(IDENTITY_RIGHT, 0.0f));
+    _up = glm::vec3(orientationAsQuaternion * glm::vec4(IDENTITY_UP,    0.0f));
+    _direction = glm::vec3(orientationAsQuaternion * glm::vec4(IDENTITY_FRONT, 0.0f));
+}
+
+void ViewFrustum::setFieldOfView(float f) {
+    if (f != _fieldOfView) {
+        _fieldOfView = f;
+        SettingHandles::fieldOfView.set(f);
+    }
+}
+void ViewFrustum::setRealWorldFieldOfView(float realWorldFieldOfView) {
+    if (realWorldFieldOfView != _realWorldFieldOfView) {
+        _realWorldFieldOfView = realWorldFieldOfView;
+        SettingHandles::realWorldFieldOfView.set(realWorldFieldOfView);
+    }
 }
 
 // ViewFrustum::calculateViewFrustum()
@@ -392,6 +390,41 @@ ViewFrustum::location ViewFrustum::cubeInFrustum(const AACube& cube) const {
     return regularResult;
 }
 
+ViewFrustum::location ViewFrustum::boxInFrustum(const AABox& box) const {
+
+    ViewFrustum::location regularResult = INSIDE;
+    ViewFrustum::location keyholeResult = OUTSIDE;
+
+    // If we have a keyholeRadius, check that first, since it's cheaper
+    if (_keyholeRadius >= 0.0f) {
+        keyholeResult = boxInKeyhole(box);
+    }
+    if (keyholeResult == INSIDE) {
+        return keyholeResult;
+    }
+
+    // TODO: These calculations are expensive, taking up 80% of our time in this function.
+    // This appears to be expensive because we have to test the distance to each plane.
+    // One suggested optimization is to first check against the approximated cone. We might
+    // also be able to test against the cone to the bounding sphere of the box.
+    for(int i=0; i < 6; i++) {
+        const glm::vec3& normal = _planes[i].getNormal();
+        const glm::vec3& boxVertexP = box.getVertexP(normal);
+        float planeToBoxVertexPDistance = _planes[i].distance(boxVertexP);
+
+        const glm::vec3& boxVertexN = box.getVertexN(normal);
+        float planeToBoxVertexNDistance = _planes[i].distance(boxVertexN);
+
+        if (planeToBoxVertexPDistance < 0) {
+            // This is outside the regular frustum, so just return the value from checking the keyhole
+            return keyholeResult;
+        } else if (planeToBoxVertexNDistance < 0) {
+            regularResult =  INTERSECT;
+        }
+    }
+    return regularResult;
+}
+
 bool testMatches(glm::quat lhs, glm::quat rhs, float epsilon = EPSILON) {
     return (fabs(lhs.x - rhs.x) <= epsilon && fabs(lhs.y - rhs.y) <= epsilon && fabs(lhs.z - rhs.z) <= epsilon
             && fabs(lhs.w - rhs.w) <= epsilon);
@@ -548,8 +581,15 @@ bool ViewFrustum::isVerySimilar(const ViewFrustum& compareTo, bool debug) const 
     return result;
 }
 
+PickRay ViewFrustum::computePickRay(float x, float y) {
+    glm::vec3 pickRayOrigin;
+    glm::vec3 pickRayDirection;
+    computePickRay(x, y, pickRayOrigin, pickRayDirection);
+    return PickRay(pickRayOrigin, pickRayDirection);
+}
+
 void ViewFrustum::computePickRay(float x, float y, glm::vec3& origin, glm::vec3& direction) const {
-    origin = _nearTopLeft + x*(_nearTopRight - _nearTopLeft) + y*(_nearBottomLeft - _nearTopLeft);
+    origin = _nearTopLeft + x * (_nearTopRight - _nearTopLeft) + y * (_nearBottomLeft - _nearTopLeft);
     direction = glm::normalize(origin - (_position + _orientation * _eyeOffsetPosition));
 }
 
@@ -840,4 +880,11 @@ void ViewFrustum::getFurthestPointFromCameraVoxelScale(const AACube& box, glm::v
         furthestPoint.z = bottomNearRight.z;
     }
 }
+
+float ViewFrustum::distanceToCamera(const glm::vec3& point) const {
+    glm::vec3 temp = getPosition() - point;
+    float distanceToPoint = sqrtf(glm::dot(temp, temp));
+    return distanceToPoint;
+}
+
 

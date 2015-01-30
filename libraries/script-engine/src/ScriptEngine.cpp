@@ -17,41 +17,31 @@
 #include <QtNetwork/QNetworkReply>
 #include <QScriptEngine>
 
+#include <AudioConstants.h>
+#include <AudioEffectOptions.h>
 #include <AudioInjector.h>
-#include <AudioRingBuffer.h>
 #include <AvatarData.h>
 #include <Bitstream.h>
 #include <CollisionInfo.h>
-#include <ModelsScriptingInterface.h>
+#include <EntityScriptingInterface.h>
 #include <NetworkAccessManager.h>
 #include <NodeList.h>
 #include <PacketHeaders.h>
-#include <ParticlesScriptingInterface.h>
-#include <Sound.h>
 #include <UUID.h>
-#include <VoxelConstants.h>
-#include <VoxelDetail.h>
 
 #include "AnimationObject.h"
 #include "ArrayBufferViewClass.h"
+#include "BatchLoader.h"
 #include "DataViewClass.h"
+#include "EventTypes.h"
 #include "MenuItemProperties.h"
-#include "MIDIEvent.h"
-#include "LocalVoxels.h"
 #include "ScriptEngine.h"
 #include "TypedArrays.h"
 #include "XMLHttpRequestClass.h"
 
-VoxelsScriptingInterface ScriptEngine::_voxelsScriptingInterface;
-ParticlesScriptingInterface ScriptEngine::_particlesScriptingInterface;
-ModelsScriptingInterface ScriptEngine::_modelsScriptingInterface;
+#include "MIDIEvent.h"
 
-static QScriptValue soundConstructor(QScriptContext* context, QScriptEngine* engine) {
-    QUrl soundURL = QUrl(context->argument(0).toString());
-    QScriptValue soundScriptValue = engine->newQObject(new Sound(soundURL), QScriptEngine::ScriptOwnership);
-
-    return soundScriptValue;
-}
+EntityScriptingInterface ScriptEngine::_entityScriptingInterface;
 
 static QScriptValue debugPrint(QScriptContext* context, QScriptEngine* engine){
     qDebug() << "script:print()<<" << context->argument(0).toString();
@@ -64,19 +54,19 @@ static QScriptValue debugPrint(QScriptContext* context, QScriptEngine* engine){
     return QScriptValue();
 }
 
-QScriptValue injectorToScriptValue(QScriptEngine *engine, AudioInjector* const &in) {
+QScriptValue avatarDataToScriptValue(QScriptEngine* engine, AvatarData* const &in) {
     return engine->newQObject(in);
 }
 
-void injectorFromScriptValue(const QScriptValue &object, AudioInjector* &out) {
-    out = qobject_cast<AudioInjector*>(object.toQObject());
+void avatarDataFromScriptValue(const QScriptValue &object, AvatarData* &out) {
+    out = qobject_cast<AvatarData*>(object.toQObject());
 }
 
-QScriptValue injectorToScriptValueInputController(QScriptEngine *engine, AbstractInputController* const &in) {
+QScriptValue inputControllerToScriptValue(QScriptEngine *engine, AbstractInputController* const &in) {
     return engine->newQObject(in);
 }
 
-void injectorFromScriptValueInputController(const QScriptValue &object, AbstractInputController* &out) {
+void inputControllerFromScriptValue(const QScriptValue &object, AbstractInputController* &out) {
     out = qobject_cast<AbstractInputController*>(object.toQObject());
 }
 
@@ -101,73 +91,9 @@ ScriptEngine::ScriptEngine(const QString& scriptContents, const QString& fileNam
     _quatLibrary(),
     _vec3Library(),
     _uuidLibrary(),
-    _animationCache(this),
+    _isUserLoaded(false),
     _arrayBufferClass(new ArrayBufferClass(this))
 {
-}
-
-ScriptEngine::ScriptEngine(const QUrl& scriptURL,
-                           AbstractControllerScriptingInterface* controllerScriptingInterface)  :
-    _scriptContents(),
-    _isFinished(false),
-    _isRunning(false),
-    _isInitialized(false),
-    _isAvatar(false),
-    _avatarIdentityTimer(NULL),
-    _avatarBillboardTimer(NULL),
-    _timerFunctionMap(),
-    _isListeningToAudioStream(false),
-    _avatarSound(NULL),
-    _numAvatarSoundSentBytes(0),
-    _controllerScriptingInterface(controllerScriptingInterface),
-    _avatarData(NULL),
-    _scriptName(),
-    _fileNameString(),
-    _quatLibrary(),
-    _vec3Library(),
-    _uuidLibrary(),
-    _animationCache(this),
-    _arrayBufferClass(new ArrayBufferClass(this))
-{
-    QString scriptURLString = scriptURL.toString();
-    _fileNameString = scriptURLString;
-
-    QUrl url(scriptURL);
-    
-    // if the scheme length is one or lower, maybe they typed in a file, let's try
-    const int WINDOWS_DRIVE_LETTER_SIZE = 1;
-    if (url.scheme().size() <= WINDOWS_DRIVE_LETTER_SIZE) {
-        url = QUrl::fromLocalFile(scriptURLString);
-    }
-
-    // ok, let's see if it's valid... and if so, load it
-    if (url.isValid()) {
-        if (url.scheme() == "file") {
-            QString fileName = url.toLocalFile();
-            QFile scriptFile(fileName);
-            if (scriptFile.open(QFile::ReadOnly | QFile::Text)) {
-                qDebug() << "Loading file:" << fileName;
-                QTextStream in(&scriptFile);
-                _scriptContents = in.readAll();
-            } else {
-                qDebug() << "ERROR Loading file:" << fileName;
-                emit errorMessage("ERROR Loading file:" + fileName);
-            }
-        } else {
-            NetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
-            QNetworkReply* reply = networkAccessManager.get(QNetworkRequest(url));
-            qDebug() << "Downloading included script at" << url;
-            QEventLoop loop;
-            QObject::connect(reply, SIGNAL(finished()), &loop, SLOT(quit()));
-            loop.exec();
-            if (reply->error() == QNetworkReply::NoError && reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) == 200) {
-                _scriptContents = reply->readAll();
-            } else {
-                qDebug() << "ERROR Loading file:" << url.toString();
-                emit errorMessage("ERROR Loading file:" + url.toString());
-            }
-        }
-    }
 }
 
 void ScriptEngine::setIsAvatar(bool isAvatar) {
@@ -185,6 +111,13 @@ void ScriptEngine::setIsAvatar(bool isAvatar) {
         // start the timers
         _avatarIdentityTimer->start(AVATAR_IDENTITY_PACKET_SEND_INTERVAL_MSECS);
         _avatarBillboardTimer->start(AVATAR_BILLBOARD_PACKET_SEND_INTERVAL_MSECS);
+    }
+
+    if (!_isAvatar) {
+        delete _avatarIdentityTimer;
+        _avatarIdentityTimer = NULL;
+        delete _avatarBillboardTimer;
+        _avatarBillboardTimer = NULL;
     }
 }
 
@@ -215,8 +148,56 @@ bool ScriptEngine::setScriptContents(const QString& scriptContents, const QStrin
     return true;
 }
 
-Q_SCRIPT_DECLARE_QMETAOBJECT(AudioInjectorOptions, QObject*)
-Q_SCRIPT_DECLARE_QMETAOBJECT(LocalVoxels, QString)
+void ScriptEngine::loadURL(const QUrl& scriptURL) {
+    if (_isRunning) {
+        return;
+    }
+
+    _fileNameString = scriptURL.toString();
+    
+    QUrl url(scriptURL);
+    
+    // if the scheme length is one or lower, maybe they typed in a file, let's try
+    const int WINDOWS_DRIVE_LETTER_SIZE = 1;
+    if (url.scheme().size() <= WINDOWS_DRIVE_LETTER_SIZE) {
+        url = QUrl::fromLocalFile(_fileNameString);
+    }
+    
+    // ok, let's see if it's valid... and if so, load it
+    if (url.isValid()) {
+        if (url.scheme() == "file") {
+            _fileNameString = url.toLocalFile();
+            QFile scriptFile(_fileNameString);
+            if (scriptFile.open(QFile::ReadOnly | QFile::Text)) {
+                qDebug() << "ScriptEngine loading file:" << _fileNameString;
+                QTextStream in(&scriptFile);
+                _scriptContents = in.readAll();
+                emit scriptLoaded(_fileNameString);
+            } else {
+                qDebug() << "ERROR Loading file:" << _fileNameString;
+                emit errorLoadingScript(_fileNameString);
+            }
+        } else {
+            QNetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
+            QNetworkReply* reply = networkAccessManager.get(QNetworkRequest(url));
+            connect(reply, &QNetworkReply::finished, this, &ScriptEngine::handleScriptDownload);
+        }
+    }
+}
+
+void ScriptEngine::handleScriptDownload() {
+    QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
+    
+    if (reply->error() == QNetworkReply::NoError && reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) == 200) {
+        _scriptContents = reply->readAll();
+        emit scriptLoaded(_fileNameString);
+    } else {
+        qDebug() << "ERROR Loading file:" << reply->url().toString();
+        emit errorLoadingScript(_fileNameString);
+    }
+    
+    reply->deleteLater();
+}
 
 void ScriptEngine::init() {
     if (_isInitialized) {
@@ -225,27 +206,20 @@ void ScriptEngine::init() {
     
     _isInitialized = true;
 
-    _voxelsScriptingInterface.init();
-    _particlesScriptingInterface.init();
-
     // register various meta-types
     registerMetaTypes(this);
     registerMIDIMetaTypes(this);
-    registerVoxelMetaTypes(this);
     registerEventTypes(this);
     registerMenuItemProperties(this);
     registerAnimationTypes(this);
     registerAvatarTypes(this);
+    registerAudioMetaTypes(this);
     Bitstream::registerTypes(this);
 
-    qScriptRegisterMetaType(this, ParticlePropertiesToScriptValue, ParticlePropertiesFromScriptValue);
-    qScriptRegisterMetaType(this, ParticleIDtoScriptValue, ParticleIDfromScriptValue);
-    qScriptRegisterSequenceMetaType<QVector<ParticleID> >(this);
-
-    qScriptRegisterMetaType(this, ModelItemPropertiesToScriptValue, ModelItemPropertiesFromScriptValue);
-    qScriptRegisterMetaType(this, ModelItemIDtoScriptValue, ModelItemIDfromScriptValue);
-    qScriptRegisterMetaType(this, RayToModelIntersectionResultToScriptValue, RayToModelIntersectionResultFromScriptValue);
-    qScriptRegisterSequenceMetaType<QVector<ModelItemID> >(this);
+    qScriptRegisterMetaType(this, EntityItemPropertiesToScriptValue, EntityItemPropertiesFromScriptValue);
+    qScriptRegisterMetaType(this, EntityItemIDtoScriptValue, EntityItemIDfromScriptValue);
+    qScriptRegisterMetaType(this, RayToEntityIntersectionResultToScriptValue, RayToEntityIntersectionResultFromScriptValue);
+    qScriptRegisterSequenceMetaType<QVector<EntityItemID> >(this);
 
     qScriptRegisterSequenceMetaType<QVector<glm::vec2> >(this);
     qScriptRegisterSequenceMetaType<QVector<glm::quat> >(this);
@@ -257,46 +231,31 @@ void ScriptEngine::init() {
     QScriptValue printConstructorValue = newFunction(debugPrint);
     globalObject().setProperty("print", printConstructorValue);
 
-    QScriptValue soundConstructorValue = newFunction(soundConstructor);
-    QScriptValue soundMetaObject = newQMetaObject(&Sound::staticMetaObject, soundConstructorValue);
-    globalObject().setProperty("Sound", soundMetaObject);
-
-    QScriptValue injectionOptionValue = scriptValueFromQMetaObject<AudioInjectorOptions>();
-    globalObject().setProperty("AudioInjectionOptions", injectionOptionValue);
-
-    QScriptValue localVoxelsValue = scriptValueFromQMetaObject<LocalVoxels>();
-    globalObject().setProperty("LocalVoxels", localVoxelsValue);
+    QScriptValue audioEffectOptionsConstructorValue = newFunction(AudioEffectOptions::constructor);
+    globalObject().setProperty("AudioEffectOptions", audioEffectOptionsConstructorValue);
     
     qScriptRegisterMetaType(this, injectorToScriptValue, injectorFromScriptValue);
-    qScriptRegisterMetaType( this, injectorToScriptValueInputController, injectorFromScriptValueInputController);
-
+    qScriptRegisterMetaType(this, inputControllerToScriptValue, inputControllerFromScriptValue);
+    qScriptRegisterMetaType(this, avatarDataToScriptValue, avatarDataFromScriptValue);
     qScriptRegisterMetaType(this, animationDetailsToScriptValue, animationDetailsFromScriptValue);
 
     registerGlobalObject("Script", this);
-    registerGlobalObject("Audio", &_audioScriptingInterface);
+    registerGlobalObject("Audio", &AudioScriptingInterface::getInstance());
     registerGlobalObject("Controller", _controllerScriptingInterface);
-    registerGlobalObject("Models", &_modelsScriptingInterface);
-    registerGlobalObject("Particles", &_particlesScriptingInterface);
+    registerGlobalObject("Entities", &_entityScriptingInterface);
     registerGlobalObject("Quat", &_quatLibrary);
     registerGlobalObject("Vec3", &_vec3Library);
     registerGlobalObject("Uuid", &_uuidLibrary);
-    registerGlobalObject("AnimationCache", &_animationCache);
-
-    registerGlobalObject("Voxels", &_voxelsScriptingInterface);
+    registerGlobalObject("AnimationCache", DependencyManager::get<AnimationCache>().data());
 
     // constants
     globalObject().setProperty("TREE_SCALE", newVariant(QVariant(TREE_SCALE)));
     globalObject().setProperty("COLLISION_GROUP_ENVIRONMENT", newVariant(QVariant(COLLISION_GROUP_ENVIRONMENT)));
     globalObject().setProperty("COLLISION_GROUP_AVATARS", newVariant(QVariant(COLLISION_GROUP_AVATARS)));
-    globalObject().setProperty("COLLISION_GROUP_VOXELS", newVariant(QVariant(COLLISION_GROUP_VOXELS)));
-    globalObject().setProperty("COLLISION_GROUP_PARTICLES", newVariant(QVariant(COLLISION_GROUP_PARTICLES)));
 
     globalObject().setProperty("AVATAR_MOTION_OBEY_LOCAL_GRAVITY", newVariant(QVariant(AVATAR_MOTION_OBEY_LOCAL_GRAVITY)));
     globalObject().setProperty("AVATAR_MOTION_OBEY_ENVIRONMENTAL_GRAVITY", newVariant(QVariant(AVATAR_MOTION_OBEY_ENVIRONMENTAL_GRAVITY)));
 
-    // let the VoxelPacketSender know how frequently we plan to call it
-    _voxelsScriptingInterface.getVoxelPacketSender()->setProcessCallIntervalHint(SCRIPT_DATA_CALLBACK_USECS);
-    _particlesScriptingInterface.getParticlePacketSender()->setProcessCallIntervalHint(SCRIPT_DATA_CALLBACK_USECS);
 }
 
 QScriptValue ScriptEngine::registerGlobalObject(const QString& name, QObject* object) {
@@ -306,6 +265,11 @@ QScriptValue ScriptEngine::registerGlobalObject(const QString& name, QObject* ob
         return value;
     }
     return QScriptValue::NullValue;
+}
+
+void ScriptEngine::registerFunction(const QString& name, QScriptEngine::FunctionSignature fun, int numArguments) {
+    QScriptValue scriptFun = newFunction(fun, numArguments);
+    globalObject().setProperty(name, scriptFun);
 }
 
 void ScriptEngine::registerGetterSetter(const QString& name, QScriptEngine::FunctionSignature getter,
@@ -341,7 +305,7 @@ QScriptValue ScriptEngine::evaluate(const QString& program, const QString& fileN
     QScriptValue result = QScriptEngine::evaluate(program, fileName, lineNumber);
     if (hasUncaughtException()) {
         int line = uncaughtExceptionLineNumber();
-        qDebug() << "Uncaught exception at (" << _fileNameString << ") line" << line << ": " << result.toString();
+        qDebug() << "Uncaught exception at (" << _fileNameString << " : " << fileName << ") line" << line << ": " << result.toString();
     }
     emit evaluationFinished(result, hasUncaughtException());
     clearExceptions();
@@ -381,7 +345,7 @@ void ScriptEngine::run() {
 
     int thisFrame = 0;
 
-    NodeList* nodeList = NodeList::getInstance();
+    auto nodeList = DependencyManager::get<NodeList>();
 
     qint64 lastUpdate = usecTimestampNow();
 
@@ -401,39 +365,20 @@ void ScriptEngine::run() {
             break;
         }
 
-        if (_voxelsScriptingInterface.getVoxelPacketSender()->serversExist()) {
-            // release the queue of edit voxel messages.
-            _voxelsScriptingInterface.getVoxelPacketSender()->releaseQueuedMessages();
+        if (_entityScriptingInterface.getEntityPacketSender()->serversExist()) {
+            // release the queue of edit entity messages.
+            _entityScriptingInterface.getEntityPacketSender()->releaseQueuedMessages();
 
             // since we're in non-threaded mode, call process so that the packets are sent
-            if (!_voxelsScriptingInterface.getVoxelPacketSender()->isThreaded()) {
-                _voxelsScriptingInterface.getVoxelPacketSender()->process();
-            }
-        }
-
-        if (_particlesScriptingInterface.getParticlePacketSender()->serversExist()) {
-            // release the queue of edit voxel messages.
-            _particlesScriptingInterface.getParticlePacketSender()->releaseQueuedMessages();
-
-            // since we're in non-threaded mode, call process so that the packets are sent
-            if (!_particlesScriptingInterface.getParticlePacketSender()->isThreaded()) {
-                _particlesScriptingInterface.getParticlePacketSender()->process();
-            }
-        }
-
-        if (_modelsScriptingInterface.getModelPacketSender()->serversExist()) {
-            // release the queue of edit voxel messages.
-            _modelsScriptingInterface.getModelPacketSender()->releaseQueuedMessages();
-
-            // since we're in non-threaded mode, call process so that the packets are sent
-            if (!_modelsScriptingInterface.getModelPacketSender()->isThreaded()) {
-                _modelsScriptingInterface.getModelPacketSender()->process();
+            if (!_entityScriptingInterface.getEntityPacketSender()->isThreaded()) {
+                _entityScriptingInterface.getEntityPacketSender()->process();
             }
         }
 
         if (_isAvatar && _avatarData) {
 
-            const int SCRIPT_AUDIO_BUFFER_SAMPLES = floor(((SCRIPT_DATA_CALLBACK_USECS * SAMPLE_RATE) / (1000 * 1000)) + 0.5);
+            const int SCRIPT_AUDIO_BUFFER_SAMPLES = floor(((SCRIPT_DATA_CALLBACK_USECS * AudioConstants::SAMPLE_RATE)
+                                                           / (1000 * 1000)) + 0.5);
             const int SCRIPT_AUDIO_BUFFER_BYTES = SCRIPT_AUDIO_BUFFER_SAMPLES * sizeof(int16_t);
 
             QByteArray avatarPacket = byteArrayWithPopulatedHeader(PacketTypeAvatarData);
@@ -486,14 +431,6 @@ void ScriptEngine::run() {
                 // pack a placeholder value for sequence number for now, will be packed when destination node is known
                 int numPreSequenceNumberBytes = audioPacket.size();
                 packetStream << (quint16) 0;
-                
-                // assume scripted avatar audio is mono and set channel flag to zero
-                packetStream << (quint8) 0;
-
-                // use the orientation and position of this avatar for the source of this audio
-                packetStream.writeRawData(reinterpret_cast<const char*>(&_avatarData->getPosition()), sizeof(glm::vec3));
-                glm::quat headOrientation = _avatarData->getHeadOrientation();
-                packetStream.writeRawData(reinterpret_cast<const char*>(&headOrientation), sizeof(glm::quat));
 
                 if (silentFrame) {
                     if (!_isListeningToAudioStream) {
@@ -503,25 +440,38 @@ void ScriptEngine::run() {
 
                     // write the number of silent samples so the audio-mixer can uphold timing
                     packetStream.writeRawData(reinterpret_cast<const char*>(&SCRIPT_AUDIO_BUFFER_SAMPLES), sizeof(int16_t));
-                } else if (nextSoundOutput) {
-                    // write the raw audio data
-                    packetStream.writeRawData(reinterpret_cast<const char*>(nextSoundOutput),
-                                              numAvailableSamples * sizeof(int16_t));
-                }
 
+                    // use the orientation and position of this avatar for the source of this audio
+                    packetStream.writeRawData(reinterpret_cast<const char*>(&_avatarData->getPosition()), sizeof(glm::vec3));
+                    glm::quat headOrientation = _avatarData->getHeadOrientation();
+                    packetStream.writeRawData(reinterpret_cast<const char*>(&headOrientation), sizeof(glm::quat));
+
+                } else if (nextSoundOutput) {
+                    // assume scripted avatar audio is mono and set channel flag to zero
+                    packetStream << (quint8)0;
+
+                    // use the orientation and position of this avatar for the source of this audio
+                    packetStream.writeRawData(reinterpret_cast<const char*>(&_avatarData->getPosition()), sizeof(glm::vec3));
+                    glm::quat headOrientation = _avatarData->getHeadOrientation();
+                    packetStream.writeRawData(reinterpret_cast<const char*>(&headOrientation), sizeof(glm::quat));
+
+                    // write the raw audio data
+                    packetStream.writeRawData(reinterpret_cast<const char*>(nextSoundOutput), numAvailableSamples * sizeof(int16_t));
+                }
+                
                 // write audio packet to AudioMixer nodes
-                NodeList* nodeList = NodeList::getInstance();
-                foreach(const SharedNodePointer& node, nodeList->getNodeHash()) {
+                auto nodeList = DependencyManager::get<NodeList>();
+                nodeList->eachNode([this, &nodeList, &audioPacket, &numPreSequenceNumberBytes](const SharedNodePointer& node){
                     // only send to nodes of type AudioMixer
                     if (node->getType() == NodeType::AudioMixer) {
                         // pack sequence number
                         quint16 sequence = _outgoingScriptAudioSequenceNumbers[node->getUUID()]++;
                         memcpy(audioPacket.data() + numPreSequenceNumberBytes, &sequence, sizeof(quint16));
-
+                        
                         // send audio packet
                         nodeList->writeDatagram(audioPacket, node);
                     }
-                }
+                });
             }
         }
 
@@ -543,33 +493,13 @@ void ScriptEngine::run() {
     // kill the avatar identity timer
     delete _avatarIdentityTimer;
 
-    if (_voxelsScriptingInterface.getVoxelPacketSender()->serversExist()) {
-        // release the queue of edit voxel messages.
-        _voxelsScriptingInterface.getVoxelPacketSender()->releaseQueuedMessages();
+    if (_entityScriptingInterface.getEntityPacketSender()->serversExist()) {
+        // release the queue of edit entity messages.
+        _entityScriptingInterface.getEntityPacketSender()->releaseQueuedMessages();
 
         // since we're in non-threaded mode, call process so that the packets are sent
-        if (!_voxelsScriptingInterface.getVoxelPacketSender()->isThreaded()) {
-            _voxelsScriptingInterface.getVoxelPacketSender()->process();
-        }
-    }
-
-    if (_particlesScriptingInterface.getParticlePacketSender()->serversExist()) {
-        // release the queue of edit voxel messages.
-        _particlesScriptingInterface.getParticlePacketSender()->releaseQueuedMessages();
-
-        // since we're in non-threaded mode, call process so that the packets are sent
-        if (!_particlesScriptingInterface.getParticlePacketSender()->isThreaded()) {
-            _particlesScriptingInterface.getParticlePacketSender()->process();
-        }
-    }
-
-    if (_modelsScriptingInterface.getModelPacketSender()->serversExist()) {
-        // release the queue of edit voxel messages.
-        _modelsScriptingInterface.getModelPacketSender()->releaseQueuedMessages();
-
-        // since we're in non-threaded mode, call process so that the packets are sent
-        if (!_modelsScriptingInterface.getModelPacketSender()->isThreaded()) {
-            _modelsScriptingInterface.getModelPacketSender()->process();
+        if (!_entityScriptingInterface.getEntityPacketSender()->isThreaded()) {
+            _entityScriptingInterface.getEntityPacketSender()->process();
         }
     }
 
@@ -591,16 +521,17 @@ void ScriptEngine::stop() {
 
 void ScriptEngine::timerFired() {
     QTimer* callingTimer = reinterpret_cast<QTimer*>(sender());
-
-    // call the associated JS function, if it exists
     QScriptValue timerFunction = _timerFunctionMap.value(callingTimer);
-    if (timerFunction.isValid()) {
-        timerFunction.call();
-    }
-
+    
     if (!callingTimer->isActive()) {
         // this timer is done, we can kill it
+        _timerFunctionMap.remove(callingTimer);
         delete callingTimer;
+    }
+    
+    // call the associated JS function, if it exists
+    if (timerFunction.isValid()) {
+        timerFunction.call();
     }
 }
 
@@ -636,17 +567,21 @@ void ScriptEngine::stopTimer(QTimer *timer) {
     }
 }
 
-QUrl ScriptEngine::resolveInclude(const QString& include) const {
-    // first lets check to see if it's already a full URL
+QUrl ScriptEngine::resolvePath(const QString& include) const {
     QUrl url(include);
+    // first lets check to see if it's already a full URL
     if (!url.scheme().isEmpty()) {
         return url;
     }
 
     // we apparently weren't a fully qualified url, so, let's assume we're relative
     // to the original URL of our script
-    QUrl parentURL(_fileNameString);
-
+    QUrl parentURL;
+    if (_parentURL.isEmpty()) {
+        parentURL = QUrl(_fileNameString);
+    } else {
+        parentURL = QUrl(_parentURL);
+    }
     // if the parent URL's scheme is empty, then this is probably a local file...
     if (parentURL.scheme().isEmpty()) {
         parentURL = QUrl::fromLocalFile(_fileNameString);
@@ -661,42 +596,60 @@ void ScriptEngine::print(const QString& message) {
     emit printedMessage(message);
 }
 
-void ScriptEngine::include(const QString& includeFile) {
-    QUrl url = resolveInclude(includeFile);
-    QString includeContents;
+/**
+ * If a callback is specified, the included files will be loaded asynchronously and the callback will be called
+ * when all of the files have finished loading.
+ * If no callback is specified, the included files will be loaded synchronously and will block execution until
+ * all of the files have finished loading.
+ */
+void ScriptEngine::include(const QStringList& includeFiles, QScriptValue callback) {
+    QList<QUrl> urls;
+    for (QString file : includeFiles) {
+        urls.append(resolvePath(file));
+    }
 
-    if (url.scheme() == "http" || url.scheme() == "ftp") {
-        NetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
-        QNetworkReply* reply = networkAccessManager.get(QNetworkRequest(url));
-        qDebug() << "Downloading included script at" << includeFile;
-        QEventLoop loop;
-        QObject::connect(reply, SIGNAL(finished()), &loop, SLOT(quit()));
-        loop.exec();
-        includeContents = reply->readAll();
-    } else {
-#ifdef _WIN32
-        QString fileName = url.toString();
-#else
-        QString fileName = url.toLocalFile();
-#endif
-        QFile scriptFile(fileName);
-        if (scriptFile.open(QFile::ReadOnly | QFile::Text)) {
-            qDebug() << "Loading file:" << fileName;
-            QTextStream in(&scriptFile);
-            includeContents = in.readAll();
-        } else {
-            qDebug() << "ERROR Loading file:" << fileName;
-            emit errorMessage("ERROR Loading file:" + fileName);
+    BatchLoader* loader = new BatchLoader(urls);
+    
+    auto evaluateScripts = [=](const QMap<QUrl, QString>& data) {
+        for (QUrl url : urls) {
+            QString contents = data[url];
+            if (contents.isNull()) {
+                qDebug() << "Error loading file: " << url;
+            } else {
+                QScriptValue result = evaluate(contents, url.toString());
+            }
         }
-    }
 
-    QScriptValue result = evaluate(includeContents);
-    if (hasUncaughtException()) {
-        int line = uncaughtExceptionLineNumber();
-        qDebug() << "Uncaught exception at (" << includeFile << ") line" << line << ":" << result.toString();
-        emit errorMessage("Uncaught exception at (" + includeFile + ") line" + QString::number(line) + ":" + result.toString());
-        clearExceptions();
+        if (callback.isFunction()) {
+            QScriptValue(callback).call();
+        }
+
+        loader->deleteLater();
+    };
+
+    connect(loader, &BatchLoader::finished, this, evaluateScripts);
+
+    // If we are destroyed before the loader completes, make sure to clean it up
+    connect(this, &QObject::destroyed, loader, &QObject::deleteLater);
+
+    loader->start();
+
+    if (!callback.isFunction() && !loader->isFinished()) {
+        QEventLoop loop;
+        QObject::connect(loader, &BatchLoader::finished, &loop, &QEventLoop::quit);
+        loop.exec();
     }
+}
+
+void ScriptEngine::include(const QString& includeFile, QScriptValue callback) {
+    QStringList urls;
+    urls.append(includeFile);
+    include(urls, callback);
+}
+
+void ScriptEngine::load(const QString& loadFile) {
+    QUrl url = resolvePath(loadFile);
+    emit loadScript(url.toString(), false);
 }
 
 void ScriptEngine::nodeKilled(SharedNodePointer node) {

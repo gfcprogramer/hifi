@@ -18,21 +18,23 @@
 
 #include <QReadWriteLock>
 
+#include <OctalCode.h>
 #include <SharedUtil.h>
 
 #include "AACube.h"
 #include "ViewFrustum.h"
 #include "OctreeConstants.h"
 
+class CollisionList;
 class EncodeBitstreamParams;
 class Octree;
 class OctreeElement;
+class OctreeElementBag;
 class OctreeElementDeleteHook;
 class OctreePacketData;
 class ReadBitstreamToTreeParams;
+class Shape;
 class VoxelSystem;
-
-const float SMALLEST_REASONABLE_OCTREE_ELEMENT_SCALE = (1.0f / TREE_SCALE) / 10000.0f; // 1/10,000th of a meter
 
 // Callers who want delete hook callbacks should implement this class
 class OctreeElementDeleteHook {
@@ -86,8 +88,20 @@ public:
     /// Override to indicate that this element requires a split before editing lower elements in the octree
     virtual bool requiresSplit() const { return false; }
 
+    /// The state of the call to appendElementData
+    typedef enum { COMPLETED, PARTIAL, NONE } AppendState;
+
+    virtual void debugExtraEncodeData(EncodeBitstreamParams& params) const { }
+    virtual void initializeExtraEncodeData(EncodeBitstreamParams& params) const { }
+    virtual bool shouldIncludeChildData(int childIndex, EncodeBitstreamParams& params) const { return true; }
+    virtual bool shouldRecurseChildTree(int childIndex, EncodeBitstreamParams& params) const { return true; }
+    
+    virtual void updateEncodedData(int childIndex, AppendState childAppendState, EncodeBitstreamParams& params) const { }
+    virtual void elementEncodeComplete(EncodeBitstreamParams& params, OctreeElementBag* bag) const { }
+
     /// Override to serialize the state of this element. This is used for persistance and for transmission across the network.
-    virtual bool appendElementData(OctreePacketData* packetData, EncodeBitstreamParams& params) const { return true; }
+    virtual AppendState appendElementData(OctreePacketData* packetData, EncodeBitstreamParams& params) const 
+                                { return COMPLETED; }
     
     /// Override to deserialize the state of this element. This is used for loading from a persisted file or from reading
     /// from the network.
@@ -105,20 +119,23 @@ public:
     virtual bool canRayIntersect() const { return isLeaf(); }
     virtual bool findRayIntersection(const glm::vec3& origin, const glm::vec3& direction,
                              bool& keepSearching, OctreeElement*& node, float& distance, BoxFace& face, 
-                             void** intersectedObject = NULL);
+                             void** intersectedObject = NULL, bool precisionPicking = false);
 
     virtual bool findDetailedRayIntersection(const glm::vec3& origin, const glm::vec3& direction,
                          bool& keepSearching, OctreeElement*& element, float& distance, BoxFace& face, 
-                         void** intersectedObject);
+                         void** intersectedObject, bool precisionPicking, float distanceToElementCube);
 
     virtual bool findSpherePenetration(const glm::vec3& center, float radius, 
                         glm::vec3& penetration, void** penetratedObject) const;
+
+    virtual bool findShapeCollisions(const Shape* shape, CollisionList& collisions) const;
 
     // Base class methods you don't need to implement
     const unsigned char* getOctalCode() const { return (_octcodePointer) ? _octalCode.pointer : &_octalCode.buffer[0]; }
     OctreeElement* getChildAtIndex(int childIndex) const;
     void deleteChildAtIndex(int childIndex);
     OctreeElement* removeChildAtIndex(int childIndex);
+    bool isParentOf(OctreeElement* possibleChild) const;
 
     /// handles deletion of all descendants, returns false if delete not approved
     bool safeDeepDeleteChildAtIndex(int childIndex, int recursionCount = 0); 
@@ -175,10 +192,10 @@ public:
     static unsigned long getInternalNodeCount() { return _voxelNodeCount - _voxelNodeLeafCount; }
     static unsigned long getLeafNodeCount() { return _voxelNodeLeafCount; }
 
-    static quint64 getVoxelMemoryUsage() { return _voxelMemoryUsage; }
+    static quint64 getOctreeMemoryUsage() { return _octreeMemoryUsage; }
     static quint64 getOctcodeMemoryUsage() { return _octcodeMemoryUsage; }
     static quint64 getExternalChildrenMemoryUsage() { return _externalChildrenMemoryUsage; }
-    static quint64 getTotalMemoryUsage() { return _voxelMemoryUsage + _octcodeMemoryUsage + _externalChildrenMemoryUsage; }
+    static quint64 getTotalMemoryUsage() { return _octreeMemoryUsage + _octcodeMemoryUsage + _externalChildrenMemoryUsage; }
 
     static quint64 getGetChildAtIndexTime() { return _getChildAtIndexTime; }
     static quint64 getGetChildAtIndexCalls() { return _getChildAtIndexCalls; }
@@ -232,6 +249,9 @@ public:
 
     OctreeElement* getOrCreateChildElementAt(float x, float y, float z, float s);
     OctreeElement* getOrCreateChildElementContaining(const AACube& box);
+    OctreeElement* getOrCreateChildElementContaining(const AABox& box);
+    int getMyChildContaining(const AACube& cube) const;
+    int getMyChildContaining(const AABox& box) const;
     int getMyChildContainingPoint(const glm::vec3& point) const;
 
 protected:
@@ -314,7 +334,7 @@ protected:
     static quint64 _voxelNodeCount;
     static quint64 _voxelNodeLeafCount;
 
-    static quint64 _voxelMemoryUsage;
+    static quint64 _octreeMemoryUsage;
     static quint64 _octcodeMemoryUsage;
     static quint64 _externalChildrenMemoryUsage;
 

@@ -29,10 +29,10 @@ public:
         AudioMixerType,
         AvatarMixerType,
         AgentType,
-        VoxelServerType,
-        ParticleServerType,
+        UNUSED_0,
+        UNUSED_1,
         MetavoxelServerType,
-        ModelServerType,
+        EntityServerType,
         AllTypes
     };
 

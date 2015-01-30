@@ -56,8 +56,9 @@ public:
     int getMaxLevelReached() const { return _maxLevelReachedInLastSearch; }
     void setMaxLevelReached(int maxLevelReached) { _maxLevelReachedInLastSearch = maxLevelReached; }
 
-    OctreeElementBag nodeBag;
+    OctreeElementBag elementBag;
     CoverageMap map;
+    OctreeElementExtraEncodeData extraEncodeData;
 
     ViewFrustum& getCurrentViewFrustum() { return _currentViewFrustum; }
     ViewFrustum& getLastKnownViewFrustum() { return _lastKnownViewFrustum; }
@@ -84,7 +85,7 @@ public:
         return (getCurrentPacketIsColor() == getWantColor() && getCurrentPacketIsCompressed() == getWantCompression());
     }
 
-    bool hasLodChanged() const { return _lodChanged; };
+    bool hasLodChanged() const { return _lodChanged; }
     
     OctreeSceneStats stats;
     
@@ -108,7 +109,7 @@ public:
 
     OCTREE_PACKET_SEQUENCE getSequenceNumber() const { return _sequenceNumber; }
 
-    void parseNackPacket(QByteArray& packet);
+    void parseNackPacket(const QByteArray& packet);
     bool hasNextNackedPacket() const;
     const QByteArray* getNextNackedPacket();
 

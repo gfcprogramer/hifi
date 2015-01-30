@@ -9,35 +9,41 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
-#include "InfoView.h"
 #include <QApplication>
-#include "Application.h"
-
+#include <QDesktopWidget>
+#include <QFileInfo>
 #include <QtWebKitWidgets/QWebFrame>
 #include <QtWebKit/QWebElement>
-#include <QDesktopWidget>
 
-#define SETTINGS_VERSION_KEY "info-version"
-#define MAX_DIALOG_HEIGHT_RATIO 0.9
+#include <PathUtils.h>
+#include <Settings.h>
 
-InfoView::InfoView(bool forced) :
+#include "InfoView.h"
+
+static const float MAX_DIALOG_HEIGHT_RATIO = 0.9f;
+
+namespace SettingHandles {
+    const SettingHandle<QString> infoVersion("info-version", QString());
+}
+
+InfoView::InfoView(bool forced, QString path) :
     _forced(forced)
 {
     setWindowFlags(Qt::WindowStaysOnTopHint | Qt::CustomizeWindowHint | Qt::WindowCloseButtonHint);
         
-    QString absPath = QFileInfo(Application::resourcesPath() + "html/interface-welcome-allsvg.html").absoluteFilePath();
+    QString absPath = QFileInfo(PathUtils::resourcesPath() + path).absoluteFilePath();
     QUrl url = QUrl::fromLocalFile(absPath);
     
     load(url);
     connect(this, SIGNAL(loadFinished(bool)), this, SLOT(loaded(bool)));
 }
 
-void InfoView::showFirstTime() {
-    new InfoView(false);
+void InfoView::showFirstTime(QString path) {
+    new InfoView(false, path);
 }
 
-void InfoView::forcedShow() {
-    new InfoView(true);
+void InfoView::forcedShow(QString path) {
+    new InfoView(true, path);
 }
 
 bool InfoView::shouldShow() {
@@ -46,20 +52,17 @@ bool InfoView::shouldShow() {
         return true;
     }
     
-    QSettings* settings = Application::getInstance()->lockSettings();
-    
-    QString lastVersion = settings->value(SETTINGS_VERSION_KEY).toString();
+    QString lastVersion = SettingHandles::infoVersion.get();
     
     QWebElement versionTag = page()->mainFrame()->findFirstElement("#version");
     QString version = versionTag.attribute("value");
     
     if (version != QString::null && (lastVersion == QString::null || lastVersion != version)) {
-        settings->setValue(SETTINGS_VERSION_KEY, version);
+        SettingHandles::infoVersion.set(version);
         shouldShow = true;
     } else {
         shouldShow = false;
     }
-    Application::getInstance()->unlockSettings();
     return shouldShow;
 }
 
@@ -69,7 +72,7 @@ void InfoView::loaded(bool ok) {
         return;
     }
     
-    QDesktopWidget* desktop = Application::getInstance()->desktop();
+    QDesktopWidget* desktop = qApp->desktop();
     QWebFrame* mainFrame = page()->mainFrame();
     
     int height = mainFrame->contentsSize().height() > desktop->height() ?

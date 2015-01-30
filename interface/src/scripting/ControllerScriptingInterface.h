@@ -46,7 +46,7 @@ private:
 
 signals:
 };
-
+ 
 
 /// handles scripting of input controller commands from JS
 class ControllerScriptingInterface : public AbstractControllerScriptingInterface {
@@ -56,6 +56,8 @@ public:
     ControllerScriptingInterface();
     void emitKeyPressEvent(QKeyEvent* event) { emit keyPressEvent(KeyEvent(*event)); }
     void emitKeyReleaseEvent(QKeyEvent* event) { emit keyReleaseEvent(KeyEvent(*event)); }
+    
+    void handleMetaEvent(HFMetaEvent* event);
 
     void emitMouseMoveEvent(QMouseEvent* event, unsigned int deviceID = 0) { emit mouseMoveEvent(MouseEvent(*event, deviceID)); }
     void emitMousePressEvent(QMouseEvent* event, unsigned int deviceID = 0) { emit mousePressEvent(MouseEvent(*event, deviceID)); }
@@ -75,8 +77,6 @@ public:
     bool isJoystickCaptured(int joystickIndex) const;
 
     void updateInputControllers();
-
-    void releaseInputController(AbstractInputController* input);
 
 public slots:
     virtual bool isPrimaryButtonPressed() const;
@@ -115,6 +115,8 @@ public slots:
 
     /// Factory to create an InputController
     virtual AbstractInputController* createInputController(const QString& deviceName, const QString& tracker);
+
+    virtual void releaseInputController(AbstractInputController* input);
 
 private:
     const PalmData* getPrimaryPalm() const;

@@ -16,7 +16,7 @@
 
 #include <glm/glm.hpp>
 
-#include "ui/TextRenderer.h"
+#include <TextRenderer.h>
 
 
 class BandwidthMeter {
@@ -34,7 +34,7 @@ public:
     static size_t const N_STREAMS = N_CHANNELS * 2;
 
     // Channel usage.
-    enum ChannelIndex { AUDIO, AVATARS, VOXELS, METAVOXELS };
+    enum ChannelIndex { AUDIO, AVATARS, OCTREE, METAVOXELS };
 
     // Meta information held for a communication channel (bidirectional).
     struct ChannelInfo {
@@ -69,16 +69,16 @@ public:
     ChannelInfo const& channelInfo(ChannelIndex i)      const   { return _channels[i]; }
 
 private:
-    static void setColorRGBA(unsigned c);
-    static void renderBox(int x, int y, int w, int h);
-    static void renderVerticalLine(int x, int y, int h);
+    static glm::vec4 getColorRGBA(unsigned c);
+    static void renderBox(int x, int y, int w, int h, unsigned c);
+    static void renderVerticalLine(int x, int y, int h, unsigned c);
 
     static inline int centered(int subject, int object);
 
 
     static ChannelInfo _CHANNELS[];
 
-    TextRenderer _textRenderer;
+    TextRenderer* _textRenderer;
     ChannelInfo* _channels;
     Stream _streams[N_STREAMS];
     int _scaleMaxIndex;

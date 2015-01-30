@@ -1,15 +1,36 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 2.8.12.2)
 
 if (WIN32)
-  cmake_policy (SET CMP0020 NEW)
+  cmake_policy(SET CMP0020 NEW)
 endif (WIN32)
+
+if (POLICY CMP0028)
+  cmake_policy(SET CMP0028 OLD)
+endif ()
+
+if (POLICY CMP0043)
+  cmake_policy(SET CMP0043 OLD)
+endif () 
+
+if (POLICY CMP0042)
+  cmake_policy(SET CMP0042 OLD)
+endif ()
 
 project(hifi)
 add_definitions(-DGLM_FORCE_RADIANS)
 
 if (WIN32)
   add_definitions(-DNOMINMAX -D_CRT_SECURE_NO_WARNINGS)
-  set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} "C:\\Program Files\\Microsoft SDKs\\Windows\\v7.1 ")
+  # set path for Microsoft SDKs
+  # if get build error about missing 'glu32' this path is likely wrong
+  # Uncomment the line with 8.1 if running Windows 8.1
+  if (MSVC10)
+    set(WINDOW_SDK_PATH "C:\\Program Files\\Microsoft SDKs\\Windows\\v7.1 ")
+  elseif (MSVC12)
+    set(WINDOW_SDK_PATH "C:\\Program Files (x86)\\Windows Kits\\8.1\\Lib\\winv6.3\\um\\x86 ")
+  endif ()
+  message (WINDOW_SDK_PATH= ${WINDOW_SDK_PATH})
+  set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} ${WINDOW_SDK_PATH})
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP")
 elseif (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX)
   #SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-long-long -pedantic")
@@ -17,14 +38,33 @@ elseif (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fno-strict-aliasing")
 endif(WIN32)
 
+if (NOT MSVC12)
+  include(CheckCXXCompilerFlag)
+  CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
+  CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
+
+  if (COMPILER_SUPPORTS_CXX11)
+  	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+  elseif(COMPILER_SUPPORTS_CXX0X)
+  	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
+  else()
+    message(STATUS "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
+  endif()
+endif ()
+
+if (APPLE) 
+  set(CMAKE_XCODE_ATTRIBUTE_CLANG_CXX_LANGUAGE_STANDARD "c++0x")
+  set(CMAKE_XCODE_ATTRIBUTE_CLANG_CXX_LIBRARY "libc++")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --stdlib=libc++")
+endif ()
+
 if (NOT QT_CMAKE_PREFIX_PATH)
   set(QT_CMAKE_PREFIX_PATH $ENV{QT_CMAKE_PREFIX_PATH})
 endif ()
 
 set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} ${QT_CMAKE_PREFIX_PATH})
 
-# set our Base SDK to 10.8
-set(CMAKE_OSX_SYSROOT /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.8.sdk)
+# set our OS X deployment target to
 set(CMAKE_OSX_DEPLOYMENT_TARGET 10.8)
 
 # Find includes in corresponding build directories
@@ -32,15 +72,22 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 # Instruct CMake to run moc automatically when needed.
 set(CMAKE_AUTOMOC ON)
 
-# targets not supported on windows
-if (NOT WIN32)
-  add_subdirectory(animation-server)
-endif (NOT WIN32)
+set(HIFI_LIBRARY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libraries")
+
+# setup for find modules
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules/")
+
+set(MACRO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/macros")
+
+file(GLOB HIFI_CUSTOM_MACROS "cmake/macros/*.cmake")
+foreach(CUSTOM_MACRO ${HIFI_CUSTOM_MACROS})
+  include(${CUSTOM_MACRO})
+endforeach()
 
 # targets on all platforms
 add_subdirectory(assignment-client)
 add_subdirectory(domain-server)
+add_subdirectory(ice-server)
 add_subdirectory(interface)
 add_subdirectory(tests)
 add_subdirectory(tools)
-add_subdirectory(voxel-edit)

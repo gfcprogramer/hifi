@@ -14,6 +14,7 @@
 
 #include <SharedUtil.h>
 #include <PerfStat.h>
+#include <RenderArgs.h>
 #include "OctreeRenderer.h"
 
 OctreeRenderer::OctreeRenderer() :
@@ -128,7 +129,13 @@ void OctreeRenderer::processDatagram(const QByteArray& dataByteArray, const Shar
                            sequence, flightTime, packetLength, dataBytes, subsection, sectionLength,
                            packetData.getUncompressedSize());
                 }
+                if (extraDebugging) {
+                    qDebug() << "OctreeRenderer::processDatagram() ******* START _tree->readBitstreamToTree()...";
+                }
                 _tree->readBitstreamToTree(packetData.getUncompressedData(), packetData.getUncompressedSize(), args);
+                if (extraDebugging) {
+                    qDebug() << "OctreeRenderer::processDatagram() ******* END _tree->readBitstreamToTree()...";
+                }
                 _tree->unlock();
             
                 dataBytes -= sectionLength;
@@ -155,13 +162,31 @@ bool OctreeRenderer::renderOperation(OctreeElement* element, void* extraData) {
     return false;
 }
 
-void OctreeRenderer::render(RenderMode renderMode) {
-    RenderArgs args = { this, _viewFrustum, getSizeScale(), getBoundaryLevelAdjust(), renderMode, 0, 0, 0 };
+void OctreeRenderer::render(RenderArgs::RenderMode renderMode, RenderArgs::RenderSide renderSide) {
+    RenderArgs args = { this, _viewFrustum, getSizeScale(), getBoundaryLevelAdjust(), renderMode, renderSide, 
+                                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     if (_tree) {
         _tree->lockForRead();
         _tree->recurseTreeWithOperation(renderOperation, &args);
         _tree->unlock();
     }
+    _meshesConsidered = args._meshesConsidered;
+    _meshesRendered = args._meshesRendered;
+    _meshesOutOfView = args._meshesOutOfView;
+    _meshesTooSmall = args._meshesTooSmall;
+
+    _elementsTouched = args._elementsTouched;
+    _itemsRendered = args._itemsRendered;
+    _itemsOutOfView = args._itemsOutOfView;
+    _itemsTooSmall = args._itemsTooSmall;
+
+    _materialSwitches = args._materialSwitches;
+    _trianglesRendered = args._trianglesRendered;
+    _quadsRendered = args._quadsRendered;
+
+    _translucentMeshPartsRendered = args._translucentMeshPartsRendered;
+    _opaqueMeshPartsRendered = args._opaqueMeshPartsRendered;
+
 }
 
 void OctreeRenderer::clear() { 

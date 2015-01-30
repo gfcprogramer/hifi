@@ -22,10 +22,9 @@
 #include <NetworkAccessManager.h>
 #include <NodeList.h>
 #include <PacketHeaders.h>
-#include <SharedUtil.h>
+#include <GLMHelpers.h>
 #include <StreamUtils.h>
 #include <UUID.h>
-#include <VoxelConstants.h>
 
 #include "AvatarData.h"
 
@@ -35,8 +34,10 @@ using namespace std;
 
 AvatarData::AvatarData() :
     _sessionUUID(),
-    _handPosition(0,0,0),
-    _bodyYaw(-90.f),
+    _position(0.0f),
+    _handPosition(0.0f),
+    _referential(NULL),
+    _bodyYaw(-90.0f),
     _bodyPitch(0.0f),
     _bodyRoll(0.0f),
     _targetScale(1.0f),
@@ -62,6 +63,59 @@ AvatarData::AvatarData() :
 AvatarData::~AvatarData() {
     delete _headData;
     delete _handData;
+    delete _referential;
+}
+
+const glm::vec3& AvatarData::getPosition() const {
+    if (_referential) {
+        _referential->update();
+    }
+    return _position;
+}
+
+void AvatarData::setPosition(const glm::vec3 position, bool overideReferential) {
+    if (!_referential || overideReferential) {
+        _position = position;
+    }
+}
+
+glm::quat AvatarData::getOrientation() const {
+    if (_referential) {
+        _referential->update();
+    }
+    
+    return glm::quat(glm::radians(glm::vec3(_bodyPitch, _bodyYaw, _bodyRoll)));
+}
+
+void AvatarData::setOrientation(const glm::quat& orientation, bool overideReferential) {
+    if (!_referential || overideReferential) {
+        glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(orientation));
+        _bodyPitch = eulerAngles.x;
+        _bodyYaw = eulerAngles.y;
+        _bodyRoll = eulerAngles.z;
+    }
+}
+
+float AvatarData::getTargetScale() const {
+    if (_referential) {
+        _referential->update();
+    }
+    
+    return _targetScale;
+}
+
+void AvatarData::setTargetScale(float targetScale, bool overideReferential) {
+    if (!_referential || overideReferential) {
+        _targetScale = targetScale;
+    }
+}
+
+void AvatarData::setClampedTargetScale(float targetScale, bool overideReferential) {
+    
+    targetScale =  glm::clamp(targetScale, MIN_AVATAR_SCALE, MAX_AVATAR_SCALE);
+    
+    setTargetScale(targetScale, overideReferential);
+    qDebug() << "Changed scale to " << _targetScale;
 }
 
 glm::vec3 AvatarData::getHandPosition() const {
@@ -81,9 +135,9 @@ QByteArray AvatarData::toByteArray() {
     // lazily allocate memory for HeadData in case we're not an Avatar instance
     if (!_headData) {
         _headData = new HeadData(this);
-        if (_forceFaceshiftConnected) {
-            _headData->_isFaceshiftConnected = true;
-        }
+    }
+    if (_forceFaceshiftConnected) {
+        _headData->_isFaceshiftConnected = true;
     }
     
     QByteArray avatarDataByteArray;
@@ -99,20 +153,23 @@ QByteArray AvatarData::toByteArray() {
     destinationBuffer += packFloatAngleToTwoByte(destinationBuffer, _bodyYaw);
     destinationBuffer += packFloatAngleToTwoByte(destinationBuffer, _bodyPitch);
     destinationBuffer += packFloatAngleToTwoByte(destinationBuffer, _bodyRoll);
-
+    
     // Body scale
     destinationBuffer += packFloatRatioToTwoByte(destinationBuffer, _targetScale);
 
     // Head rotation (NOTE: This needs to become a quaternion to save two bytes)
-    destinationBuffer += packFloatAngleToTwoByte(destinationBuffer, _headData->getFinalYaw());
-    destinationBuffer += packFloatAngleToTwoByte(destinationBuffer, _headData->getFinalPitch());
-    destinationBuffer += packFloatAngleToTwoByte(destinationBuffer, _headData->getFinalRoll());
-    
-    // Head lean X,Z (head lateral and fwd/back motion relative to torso)
-    memcpy(destinationBuffer, &_headData->_leanSideways, sizeof(_headData->_leanSideways));
-    destinationBuffer += sizeof(_headData->_leanSideways);
-    memcpy(destinationBuffer, &_headData->_leanForward, sizeof(_headData->_leanForward));
-    destinationBuffer += sizeof(_headData->_leanForward);
+    glm::vec3 pitchYawRoll = glm::vec3(_headData->getFinalPitch(),
+                                       _headData->getFinalYaw(),
+                                       _headData->getFinalRoll());
+    if (this->isMyAvatar()) {
+        glm::vec3 lean = glm::vec3(_headData->getFinalLeanForward(),
+                                   _headData->getTorsoTwist(),
+                                   _headData->getFinalLeanSideways());
+        pitchYawRoll -= lean;
+    }
+    destinationBuffer += packFloatAngleToTwoByte(destinationBuffer, pitchYawRoll.x);
+    destinationBuffer += packFloatAngleToTwoByte(destinationBuffer, pitchYawRoll.y);
+    destinationBuffer += packFloatAngleToTwoByte(destinationBuffer, pitchYawRoll.z);
 
     // Lookat Position
     memcpy(destinationBuffer, &_headData->_lookAtPosition, sizeof(_headData->_lookAtPosition));
@@ -121,11 +178,6 @@ QByteArray AvatarData::toByteArray() {
     // Instantaneous audio loudness (used to drive facial animation)
     memcpy(destinationBuffer, &_headData->_audioLoudness, sizeof(float));
     destinationBuffer += sizeof(float);
-
-    // chat message
-    *destinationBuffer++ = _chatMessage.size();
-    memcpy(destinationBuffer, _chatMessage.data(), _chatMessage.size() * sizeof(char));
-    destinationBuffer += _chatMessage.size() * sizeof(char);
     
     // bitMask of less than byte wide items
     unsigned char bitItems = 0;
@@ -133,13 +185,27 @@ QByteArray AvatarData::toByteArray() {
     // key state
     setSemiNibbleAt(bitItems,KEY_STATE_START_BIT,_keyState);
     // hand state
-    setSemiNibbleAt(bitItems,HAND_STATE_START_BIT,_handState);
+    bool isFingerPointing = _handState & IS_FINGER_POINTING_FLAG;
+    setSemiNibbleAt(bitItems, HAND_STATE_START_BIT, _handState & ~IS_FINGER_POINTING_FLAG);
+    if (isFingerPointing) {
+        setAtBit(bitItems, HAND_STATE_FINGER_POINTING_BIT);
+    }
     // faceshift state
-    if (_headData->_isFaceshiftConnected) { setAtBit(bitItems, IS_FACESHIFT_CONNECTED); }
+    if (_headData->_isFaceshiftConnected) {
+        setAtBit(bitItems, IS_FACESHIFT_CONNECTED);
+    }
     if (_isChatCirclingEnabled) {
         setAtBit(bitItems, IS_CHAT_CIRCLING_ENABLED);
     }
+    if (_referential != NULL && _referential->isValid()) {
+        setAtBit(bitItems, HAS_REFERENTIAL);
+    }
     *destinationBuffer++ = bitItems;
+    
+    // Add referential
+    if (_referential != NULL && _referential->isValid()) {
+        destinationBuffer += _referential->packReferential(destinationBuffer);
+    }
 
     // If it is connected, pack up the data
     if (_headData->_isFaceshiftConnected) {
@@ -224,19 +290,16 @@ int AvatarData::parseDataAtOffset(const QByteArray& packet, int offset) {
     //     bodyPitch     =  2 (compressed float)
     //     bodyRoll      =  2 (compressed float)
     //     targetScale   =  2 (compressed float)
-    //     headYaw       =  2 (compressed float)
     //     headPitch     =  2 (compressed float)
+    //     headYaw       =  2 (compressed float)
     //     headRoll      =  2 (compressed float)
-    //     leanSideways  =  4
-    //     leanForward   =  4
     //     lookAt        = 12
     //     audioLoudness =  4
     // }
-    // + 1 byte for messageSize (0)
     // + 1 byte for pupilSize
     // + 1 byte for numJoints (0)
-    // = 53 bytes
-    int minPossibleSize = 53; 
+    // = 45 bytes
+    int minPossibleSize = 45;
     
     int maxAvailableSize = packet.size() - offset;
     if (minPossibleSize > maxAvailableSize) {
@@ -262,7 +325,7 @@ int AvatarData::parseDataAtOffset(const QByteArray& packet, int offset) {
             }
             return maxAvailableSize;
         }
-        _position = position;
+        setPosition(position);
         
         // rotation (NOTE: This needs to become a quaternion to save two bytes)
         float yaw, pitch, roll;
@@ -275,9 +338,12 @@ int AvatarData::parseDataAtOffset(const QByteArray& packet, int offset) {
             }
             return maxAvailableSize;
         }
-        _bodyYaw = yaw;
-        _bodyPitch = pitch;
-        _bodyRoll = roll;
+        if (_bodyYaw != yaw || _bodyPitch != pitch || _bodyRoll != roll) {
+            _hasNewJointRotations = true;
+            _bodyYaw = yaw;
+            _bodyPitch = pitch;
+            _bodyRoll = roll;
+        }
         
         // scale
         float scale;
@@ -294,8 +360,8 @@ int AvatarData::parseDataAtOffset(const QByteArray& packet, int offset) {
     { // Head rotation 
         //(NOTE: This needs to become a quaternion to save two bytes)
         float headYaw, headPitch, headRoll;
-        sourceBuffer += unpackFloatAngleFromTwoByte((uint16_t*) sourceBuffer, &headYaw);
         sourceBuffer += unpackFloatAngleFromTwoByte((uint16_t*) sourceBuffer, &headPitch);
+        sourceBuffer += unpackFloatAngleFromTwoByte((uint16_t*) sourceBuffer, &headYaw);
         sourceBuffer += unpackFloatAngleFromTwoByte((uint16_t*) sourceBuffer, &headRoll);
         if (glm::isnan(headYaw) || glm::isnan(headPitch) || glm::isnan(headRoll)) {
             if (shouldLogError(now)) {
@@ -303,27 +369,10 @@ int AvatarData::parseDataAtOffset(const QByteArray& packet, int offset) {
             }
             return maxAvailableSize;
         }
-        _headData->setBaseYaw(headYaw);
         _headData->setBasePitch(headPitch);
+        _headData->setBaseYaw(headYaw);
         _headData->setBaseRoll(headRoll);
     } // 6 bytes
-        
-    // Head lean (relative to pelvis)
-    {
-        float leanSideways, leanForward;
-        memcpy(&leanSideways, sourceBuffer, sizeof(float));
-        sourceBuffer += sizeof(float);
-        memcpy(&leanForward, sourceBuffer, sizeof(float));
-        sourceBuffer += sizeof(float);
-        if (glm::isnan(leanSideways) || glm::isnan(leanForward)) {
-            if (shouldLogError(now)) {
-                qDebug() << "Discard nan AvatarData::leanSideways,leanForward; displayName = '" << _displayName << "'";
-            }
-            return maxAvailableSize;
-        }
-        _headData->_leanSideways = leanSideways;
-        _headData->_leanForward = leanForward;
-    } // 8 bytes
     
     { // Lookat Position
         glm::vec3 lookAt;
@@ -352,36 +401,41 @@ int AvatarData::parseDataAtOffset(const QByteArray& packet, int offset) {
         _headData->_audioLoudness = audioLoudness;
     } // 4 bytes
     
-    // chat
-    int chatMessageSize = *sourceBuffer++;
-    minPossibleSize += chatMessageSize;
-    if (minPossibleSize > maxAvailableSize) {
-        if (shouldLogError(now)) {
-            qDebug() << "Malformed AvatarData packet before ChatMessage;"
-                << " displayName = '" << _displayName << "'"
-                << " minPossibleSize = " << minPossibleSize 
-                << " maxAvailableSize = " << maxAvailableSize;
-        }
-        return maxAvailableSize;
-    }
-    { // chat payload
-        _chatMessage = string((char*)sourceBuffer, chatMessageSize);
-        sourceBuffer += chatMessageSize * sizeof(char);
-    } // 1 + chatMessageSize bytes
-    
     { // bitFlags and face data
-        unsigned char bitItems = 0;
-        bitItems = (unsigned char)*sourceBuffer++;
-    
+        unsigned char bitItems = *sourceBuffer++;
+        
         // key state, stored as a semi-nibble in the bitItems
         _keyState = (KeyState)getSemiNibbleAt(bitItems,KEY_STATE_START_BIT);
-        
-        // hand state, stored as a semi-nibble in the bitItems
-        _handState = getSemiNibbleAt(bitItems,HAND_STATE_START_BIT);
+
+        // hand state, stored as a semi-nibble plus a bit in the bitItems
+        // we store the hand state as well as other items in a shared bitset. The hand state is an octal, but is split 
+        // into two sections to maintain backward compatibility. The bits are ordered as such (0-7 left to right).
+        //     +---+-----+-----+--+
+        //     |x,x|H0,H1|x,x,x|H2|
+        //     +---+-----+-----+--+
+        // Hand state - H0,H1,H2 is found in the 3rd, 4th, and 8th bits
+        _handState = getSemiNibbleAt(bitItems, HAND_STATE_START_BIT) 
+            + (oneAtBit(bitItems, HAND_STATE_FINGER_POINTING_BIT) ? IS_FINGER_POINTING_FLAG : 0);
         
         _headData->_isFaceshiftConnected = oneAtBit(bitItems, IS_FACESHIFT_CONNECTED);
         _isChatCirclingEnabled = oneAtBit(bitItems, IS_CHAT_CIRCLING_ENABLED);
+        bool hasReferential = oneAtBit(bitItems, HAS_REFERENTIAL);
         
+        // Referential
+        if (hasReferential) {
+            Referential* ref = new Referential(sourceBuffer, this);
+            if (_referential == NULL ||
+                ref->version() != _referential->version()) {
+                changeReferential(ref);
+            } else {
+                delete ref;
+            }
+            _referential->update();
+        } else if (_referential != NULL) {
+            changeReferential(NULL);
+        }
+    
+    
         if (_headData->_isFaceshiftConnected) {
             float leftEyeBlink, rightEyeBlink, averageLoudness, browAudioLift;
             minPossibleSize += sizeof(leftEyeBlink) + sizeof(rightEyeBlink) + sizeof(averageLoudness) + sizeof(browAudioLift);
@@ -503,6 +557,178 @@ int AvatarData::parseDataAtOffset(const QByteArray& packet, int offset) {
     return sourceBuffer - startPosition;
 }
 
+bool AvatarData::hasReferential() {
+    return _referential != NULL;
+}
+
+bool AvatarData::isPlaying() {
+    return _player && _player->isPlaying();
+}
+
+bool AvatarData::isPaused() {
+    return _player && _player->isPaused();
+}
+
+qint64 AvatarData::playerElapsed() {
+    if (!_player) {
+        return 0;
+    }
+    if (QThread::currentThread() != thread()) {
+        qint64 result;
+        QMetaObject::invokeMethod(this, "playerElapsed", Qt::BlockingQueuedConnection,
+                                  Q_RETURN_ARG(qint64, result));
+        return result;
+    }
+    return _player->elapsed();
+}
+
+qint64 AvatarData::playerLength() {
+    if (!_player) {
+        return 0;
+    }
+    if (QThread::currentThread() != thread()) {
+        qint64 result;
+        QMetaObject::invokeMethod(this, "playerLength", Qt::BlockingQueuedConnection,
+                                  Q_RETURN_ARG(qint64, result));
+        return result;
+    }
+    return _player->getRecording()->getLength();
+}
+
+int AvatarData::playerCurrentFrame() {
+    return (_player) ? _player->getCurrentFrame() : 0;
+}
+
+int AvatarData::playerFrameNumber() {
+    return (_player && _player->getRecording()) ? _player->getRecording()->getFrameNumber() : 0;
+}
+
+void AvatarData::loadRecording(QString filename) {
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, "loadRecording", Qt::BlockingQueuedConnection,
+                                  Q_ARG(QString, filename));
+        return;
+    }
+    if (!_player) {
+        _player = PlayerPointer(new Player(this));
+    }
+    
+    _player->loadFromFile(filename);
+}
+
+void AvatarData::startPlaying() {
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, "startPlaying", Qt::BlockingQueuedConnection);
+        return;
+    }
+    if (!_player) {
+        _player = PlayerPointer(new Player(this));
+    }
+    _player->startPlaying();
+}
+
+void AvatarData::setPlayerVolume(float volume) {
+    if (_player) {
+        _player->setVolume(volume);
+    }
+}
+
+void AvatarData::setPlayerAudioOffset(int audioOffset) {
+    if (_player) {
+        _player->setAudioOffset(audioOffset);
+    }
+}
+
+void AvatarData::setPlayerFrame(unsigned int frame) {
+    if (_player) {
+        _player->setCurrentFrame(frame);
+    }
+}
+
+void AvatarData::setPlayerTime(unsigned int time) {
+    if (_player) {
+        _player->setCurrentTime(time);
+    }
+}
+
+void AvatarData::setPlayFromCurrentLocation(bool playFromCurrentLocation) {
+    if (_player) {
+        _player->setPlayFromCurrentLocation(playFromCurrentLocation);
+    }
+}
+
+void AvatarData::setPlayerLoop(bool loop) {
+    if (_player) {
+        _player->setLoop(loop);
+    }
+}
+
+void AvatarData::setPlayerUseDisplayName(bool useDisplayName) {
+    if(_player) {
+        _player->useDisplayName(useDisplayName);
+    }
+}
+
+void AvatarData::setPlayerUseAttachments(bool useAttachments) {
+    if(_player) {
+        _player->useAttachements(useAttachments);
+    }
+}
+
+void AvatarData::setPlayerUseHeadModel(bool useHeadModel) {
+    if(_player) {
+        _player->useHeadModel(useHeadModel);
+    }
+}
+
+void AvatarData::setPlayerUseSkeletonModel(bool useSkeletonModel) {
+    if(_player) {
+        _player->useSkeletonModel(useSkeletonModel);
+    }
+}
+
+void AvatarData::play() {
+    if (isPlaying()) {
+        if (QThread::currentThread() != thread()) {
+            QMetaObject::invokeMethod(this, "play", Qt::BlockingQueuedConnection);
+            return;
+        }
+        
+        _player->play();
+    }
+}
+
+void AvatarData::pausePlayer() {
+    if (!_player) {
+        return;
+    }
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, "pausePlayer", Qt::BlockingQueuedConnection);
+        return;
+    }
+    if (_player) {
+        _player->pausePlayer();
+    }
+}
+
+void AvatarData::stopPlaying() {
+    if (!_player) {
+        return;
+    }
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, "stopPlaying", Qt::BlockingQueuedConnection);
+        return;
+    }
+    if (_player) {
+        _player->stopPlaying();
+    }
+}
+
+void AvatarData::changeReferential(Referential *ref) {
+    delete _referential;
+    _referential = ref;
+}
+
 void AvatarData::setJointData(int index, const glm::quat& rotation) {
     if (index == -1) {
         return;
@@ -594,6 +820,44 @@ glm::quat AvatarData::getJointRotation(const QString& name) const {
         return result;
     }
     return getJointRotation(getJointIndex(name));
+}
+
+QVector<glm::quat> AvatarData::getJointRotations() const {
+    if (QThread::currentThread() != thread()) {
+        QVector<glm::quat> result;
+        QMetaObject::invokeMethod(const_cast<AvatarData*>(this),
+                                  "getJointRotations", Qt::BlockingQueuedConnection,
+                                  Q_RETURN_ARG(QVector<glm::quat>, result));
+        return result;
+    }
+    QVector<glm::quat> jointRotations(_jointData.size());
+    for (int i = 0; i < _jointData.size(); ++i) {
+        jointRotations[i] = _jointData[i].rotation;
+    }
+    return jointRotations;
+}
+
+void AvatarData::setJointRotations(QVector<glm::quat> jointRotations) {
+    if (QThread::currentThread() != thread()) {
+        QVector<glm::quat> result;
+        QMetaObject::invokeMethod(const_cast<AvatarData*>(this),
+                                  "setJointRotations", Qt::BlockingQueuedConnection,
+                                  Q_ARG(QVector<glm::quat>, jointRotations));
+    }
+    if (_jointData.size() < jointRotations.size()) {
+        _jointData.resize(jointRotations.size());
+    }
+    for (int i = 0; i < jointRotations.size(); ++i) {
+        if (i < _jointData.size()) {
+            setJointData(i, jointRotations[i]);
+        }
+    }
+}
+
+void AvatarData::clearJointsData() {
+    for (int i = 0; i < _jointData.size(); ++i) {
+        clearJointData(i);
+    }
 }
 
 bool AvatarData::hasIdentityChangedAfterParsing(const QByteArray &packet) {
@@ -759,7 +1023,7 @@ void AvatarData::setBillboardFromURL(const QString &billboardURL) {
     QNetworkRequest billboardRequest;
     billboardRequest.setUrl(QUrl(billboardURL));
     
-    NetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
+    QNetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
     QNetworkReply* networkReply = networkAccessManager.get(billboardRequest);
     connect(networkReply, SIGNAL(finished()), this, SLOT(setBillboardFromNetworkReply()));
 }
@@ -803,26 +1067,11 @@ void AvatarData::setJointMappingsFromNetworkReply() {
     networkReply->deleteLater();
 }
 
-void AvatarData::setClampedTargetScale(float targetScale) {
-    
-    targetScale =  glm::clamp(targetScale, MIN_AVATAR_SCALE, MAX_AVATAR_SCALE);
-    
-    _targetScale = targetScale;
-    qDebug() << "Changed scale to " << _targetScale;
-}
-
-void AvatarData::setOrientation(const glm::quat& orientation) {
-    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(orientation));
-    _bodyPitch = eulerAngles.x;
-    _bodyYaw = eulerAngles.y;
-    _bodyRoll = eulerAngles.z;
-}
-
 void AvatarData::sendIdentityPacket() {
     QByteArray identityPacket = byteArrayWithPopulatedHeader(PacketTypeAvatarIdentity);
     identityPacket.append(identityByteArray());
     
-    NodeList::getInstance()->broadcastToNodes(identityPacket, NodeSet() << NodeType::AvatarMixer);
+    DependencyManager::get<NodeList>()->broadcastToNodes(identityPacket, NodeSet() << NodeType::AvatarMixer);
 }
 
 void AvatarData::sendBillboardPacket() {
@@ -830,7 +1079,7 @@ void AvatarData::sendBillboardPacket() {
         QByteArray billboardPacket = byteArrayWithPopulatedHeader(PacketTypeAvatarBillboard);
         billboardPacket.append(_billboard);
         
-        NodeList::getInstance()->broadcastToNodes(billboardPacket, NodeSet() << NodeType::AvatarMixer);
+        DependencyManager::get<NodeList>()->broadcastToNodes(billboardPacket, NodeSet() << NodeType::AvatarMixer);
     }
 }
 
@@ -839,7 +1088,7 @@ void AvatarData::updateJointMappings() {
     _jointNames.clear();
     
     if (_skeletonModelURL.fileName().toLower().endsWith(".fst")) {
-        NetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
+        QNetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
         QNetworkReply* networkReply = networkAccessManager.get(QNetworkRequest(_skeletonModelURL));
         connect(networkReply, SIGNAL(finished()), this, SLOT(setJointMappingsFromNetworkReply()));
     }

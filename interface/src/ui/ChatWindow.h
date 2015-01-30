@@ -38,7 +38,7 @@ const int AUTO_SCROLL_THRESHOLD = 20;
 class ChatWindow;
 }
 
-class ChatWindow : public FramelessDialog {
+class ChatWindow : public QWidget {
     Q_OBJECT
 
 public:
@@ -61,9 +61,9 @@ private:
     bool isNearBottom();
     void scrollToBottom();
 
-    Ui::ChatWindow* ui;
-    int numMessagesAfterLastTimeStamp;
-    QDateTime lastMessageStamp;
+    Ui::ChatWindow* _ui;
+    int _numMessagesAfterLastTimeStamp;
+    QDateTime _lastMessageStamp;
     bool _mousePressed;
     QPoint _mouseStartPosition;
     QSystemTrayIcon _trayIcon;

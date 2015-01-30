@@ -29,7 +29,7 @@ const float DEFAULT_SLOW_START_THRESHOLD = 1000.0f;
 DatagramSequencer::DatagramSequencer(const QByteArray& datagramHeader, QObject* parent) :
     QObject(parent),
     _outgoingPacketStream(&_outgoingPacketData, QIODevice::WriteOnly),
-    _outputStream(_outgoingPacketStream),
+    _outputStream(_outgoingPacketStream, Bitstream::NO_METADATA, Bitstream::NO_GENERICS, this),
     _incomingDatagramStream(&_incomingDatagramBuffer),
     _datagramHeaderSize(datagramHeader.size()),
     _outgoingPacketNumber(0),
@@ -38,14 +38,15 @@ DatagramSequencer::DatagramSequencer(const QByteArray& datagramHeader, QObject* 
     _outgoingDatagramStream(&_outgoingDatagramBuffer),
     _incomingPacketNumber(0),
     _incomingPacketStream(&_incomingPacketData, QIODevice::ReadOnly),
-    _inputStream(_incomingPacketStream),
+    _inputStream(_incomingPacketStream, Bitstream::NO_METADATA, Bitstream::NO_GENERICS, this),
     _receivedHighPriorityMessages(0),
     _maxPacketSize(DEFAULT_MAX_PACKET_SIZE),
     _packetsPerGroup(1.0f),
     _packetsToWrite(0.0f),
     _slowStartThreshold(DEFAULT_SLOW_START_THRESHOLD),
     _packetRateIncreasePacketNumber(0),
-    _packetRateDecreasePacketNumber(0) {
+    _packetRateDecreasePacketNumber(0),
+    _packetDropCount(0) {
 
     _outgoingPacketStream.setByteOrder(QDataStream::LittleEndian);
     _incomingDatagramStream.setByteOrder(QDataStream::LittleEndian);
@@ -239,39 +240,44 @@ void DatagramSequencer::receivedDatagram(const QByteArray& datagram) {
         _sendRecords.erase(_sendRecords.begin(), it + 1);
     }
     
-    // alert external parties so that they can read the middle
-    emit readyToRead(_inputStream);
-    
-    // read and dispatch the high-priority messages
-    int highPriorityMessageCount;
-    _inputStream >> highPriorityMessageCount;
-    int newHighPriorityMessages = highPriorityMessageCount - _receivedHighPriorityMessages;
-    for (int i = 0; i < highPriorityMessageCount; i++) {
-        QVariant data;
-        _inputStream >> data;
-        if (i >= _receivedHighPriorityMessages) {
-            emit receivedHighPriorityMessage(data);
+    try {
+        // alert external parties so that they can read the middle
+        emit readyToRead(_inputStream);
+        
+        // read and dispatch the high-priority messages
+        int highPriorityMessageCount;
+        _inputStream >> highPriorityMessageCount;
+        int newHighPriorityMessages = highPriorityMessageCount - _receivedHighPriorityMessages;
+        for (int i = 0; i < highPriorityMessageCount; i++) {
+            QVariant data;
+            _inputStream >> data;
+            if (i >= _receivedHighPriorityMessages) {
+                emit receivedHighPriorityMessage(data);
+            }
         }
-    }
-    _receivedHighPriorityMessages = highPriorityMessageCount;
+        _receivedHighPriorityMessages = highPriorityMessageCount;
+        
+        // read the reliable data, if any
+        quint32 reliableChannels;
+        _incomingPacketStream >> reliableChannels;
+        for (quint32 i = 0; i < reliableChannels; i++) {
+            quint32 channelIndex;
+            _incomingPacketStream >> channelIndex;
+            getReliableInputChannel(channelIndex)->readData(_incomingPacketStream);
+        }
+        
+        // record the receipt
+        ReceiveRecord record = { _incomingPacketNumber, _inputStream.getAndResetReadMappings(), newHighPriorityMessages };
+        _receiveRecords.append(record);
+        
+        emit receiveRecorded();
     
-    // read the reliable data, if any
-    quint32 reliableChannels;
-    _incomingPacketStream >> reliableChannels;
-    for (quint32 i = 0; i < reliableChannels; i++) {
-        quint32 channelIndex;
-        _incomingPacketStream >> channelIndex;
-        getReliableInputChannel(channelIndex)->readData(_incomingPacketStream);
+    } catch (const BitstreamException& e) {
+        qWarning() << "Error reading datagram:" << e.getDescription();
     }
     
     _incomingPacketStream.device()->seek(0);
-    _inputStream.reset();
-    
-    // record the receipt
-    ReceiveRecord record = { _incomingPacketNumber, _inputStream.getAndResetReadMappings(), newHighPriorityMessages };
-    _receiveRecords.append(record);
-    
-    emit receiveRecorded();
+    _inputStream.reset();    
 }
 
 void DatagramSequencer::sendClearSharedObjectMessage(int id) {
@@ -301,10 +307,10 @@ void DatagramSequencer::clearReliableChannel(QObject* object) {
 void DatagramSequencer::sendRecordAcknowledged(const SendRecord& record) {
     // stop acknowledging the recorded packets
     while (!_receiveRecords.isEmpty() && _receiveRecords.first().packetNumber <= record.lastReceivedPacketNumber) {
+        emit receiveAcknowledged(0);
         const ReceiveRecord& received = _receiveRecords.first();
         _inputStream.persistReadMappings(received.mappings);
         _receivedHighPriorityMessages -= received.newHighPriorityMessages;
-        emit receiveAcknowledged(0);
         _receiveRecords.removeFirst();
     }
     _outputStream.persistWriteMappings(record.mappings);
@@ -343,11 +349,18 @@ void DatagramSequencer::sendRecordLost(const SendRecord& record) {
         }
     }
     
-    // halve the rate and remember as threshold
-    if (record.packetNumber >= _packetRateDecreasePacketNumber) {
-        _packetsPerGroup = qMax(_packetsPerGroup * 0.5f, 1.0f);
-        _slowStartThreshold = _packetsPerGroup;
-        _packetRateDecreasePacketNumber = _outgoingPacketNumber + 1;
+    // if we've lost three in a row, halve the rate and remember as threshold
+    if (_packetDropCount == 0 || record.packetNumber == _lastPacketDropped + 1) {
+        _packetDropCount++;
+        _lastPacketDropped = record.packetNumber;
+        const int CONSECUTIVE_DROPS_BEFORE_REDUCTION = 1;
+        if (_packetDropCount >= CONSECUTIVE_DROPS_BEFORE_REDUCTION && record.packetNumber >= _packetRateDecreasePacketNumber) {
+            _packetsPerGroup = qMax(_packetsPerGroup * 0.5f, 1.0f);
+            _slowStartThreshold = _packetsPerGroup;
+            _packetRateDecreasePacketNumber = _outgoingPacketNumber + 1;
+        }
+    } else {
+        _packetDropCount = 0;
     }
 }
 
@@ -702,8 +715,9 @@ void ReliableChannel::endMessage() {
     
     quint32 length = _buffer.pos() - _messageLengthPlaceholder;
     _buffer.writeBytes(_messageLengthPlaceholder, sizeof(quint32), (const char*)&length);
-    _messageReceivedOffset = getBytesWritten();
-    _messageSize = length;
+
+    pruneOutgoingMessageStats();
+    _outgoingMessageStats.append(OffsetSizePair(getBytesWritten(), length));
 }
 
 void ReliableChannel::sendMessage(const QVariant& message) {
@@ -712,12 +726,14 @@ void ReliableChannel::sendMessage(const QVariant& message) {
     endMessage();
 }
 
-bool ReliableChannel::getMessageSendProgress(int& sent, int& total) const {
-    if (!_messagesEnabled || _offset >= _messageReceivedOffset) {
+bool ReliableChannel::getMessageSendProgress(int& sent, int& total) {
+    pruneOutgoingMessageStats();
+    if (!_messagesEnabled || _outgoingMessageStats.isEmpty()) {
         return false;
     }
-    sent = qMax(0, _messageSize - (_messageReceivedOffset - _offset));
-    total = _messageSize;
+    const OffsetSizePair& stat = _outgoingMessageStats.first();
+    sent = qMax(0, stat.second - (stat.first - _offset));
+    total = stat.second;
     return true;
 }
 
@@ -752,13 +768,12 @@ ReliableChannel::ReliableChannel(DatagramSequencer* sequencer, int index, bool o
     _index(index),
     _output(output),
     _dataStream(&_buffer),
-    _bitstream(_dataStream),
+    _bitstream(_dataStream, Bitstream::NO_METADATA, Bitstream::NO_GENERICS, this),
     _priority(1.0f),
     _offset(0),
     _writePosition(0),
     _writePositionResetPacketNumber(0),
-    _messagesEnabled(true),
-    _messageReceivedOffset(0) {
+    _messagesEnabled(true) {
     
     _buffer.open(output ? QIODevice::WriteOnly : QIODevice::ReadOnly);
     _dataStream.setByteOrder(QDataStream::LittleEndian);
@@ -926,6 +941,12 @@ void ReliableChannel::readData(QDataStream& in) {
     if (_buffer.pos() > 0) {
         _buffer.remove((int)_buffer.pos());
         _buffer.seek(0);
+    }
+}
+
+void ReliableChannel::pruneOutgoingMessageStats() {
+    while (!_outgoingMessageStats.isEmpty() && _offset >= _outgoingMessageStats.first().first) {
+        _outgoingMessageStats.removeFirst();
     }
 }
 

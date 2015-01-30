@@ -30,11 +30,11 @@ public:
     static const int DEFAULT_PACKETS_PER_SECOND = 1;
     static const int NO_SERVER_CHECK_RATE = 60; // if no servers yet detected, keep checking at 60fps
 
-    JurisdictionListener(NodeType_t type = NodeType::VoxelServer);
+    JurisdictionListener(NodeType_t type = NodeType::EntityServer);
     
     virtual bool process();
 
-    NodeToJurisdictionMap* getJurisdictions() { return &_jurisdictions; };
+    NodeToJurisdictionMap* getJurisdictions() { return &_jurisdictions; }
 
 
     NodeType_t getNodeType() const { return _nodeType; }
@@ -47,10 +47,6 @@ public slots:
 protected:
     /// Callback for processing of received packets. Will process any queued PacketType_JURISDICTION and update the
     /// jurisdiction map member variable
-    /// \param sockaddr& senderAddress the address of the sender
-    /// \param packetData pointer to received data
-    /// \param ssize_t packetLength size of received data
-    /// \thread "this" individual processing thread
     virtual void processPacket(const SharedNodePointer& sendingNode, const QByteArray& packet);
 
 private:

@@ -10,7 +10,7 @@
 //
 
 
-var buttonImageUrl = "https://worklist-prod.s3.amazonaws.com/attachment/0aca88e1-9bd8-5c1d.svg";
+var buttonImageUrl = "https://s3.amazonaws.com/hifi-public/images/tools/sit.svg";
 
 var windowDimensions = Controller.getViewportDimensions();
 
@@ -89,7 +89,12 @@ var sittingDownAnimation = function(deltaTime) {
 
 		var pos = { x: startPosition.x - 0.3 * factor, y: startPosition.y - 0.5 * factor, z: startPosition.z};
 		MyAvatar.position = pos;
-	}
+	} else {
+        Script.update.disconnect(sittingDownAnimation);
+        if (seat.model) {
+            MyAvatar.setModelReferential(seat.model.id);
+        }
+    }
 }
 
 var standingUpAnimation = function(deltaTime) {
@@ -103,7 +108,10 @@ var standingUpAnimation = function(deltaTime) {
 
 		var pos = { x: startPosition.x + 0.3 * (passedTime/animationLenght), y: startPosition.y + 0.5 * (passedTime/animationLenght), z: startPosition.z};
 		MyAvatar.position = pos;
-	}
+	} else {
+        Script.update.disconnect(standingUpAnimation);
+        
+    }
 }
 
 var goToSeatAnimation = function(deltaTime) {
@@ -147,7 +155,8 @@ function standUp() {
     print("standUp sitting status: " + Settings.getValue(sittingSettingsHandle, false));
 	passedTime = 0.0;
 	startPosition = MyAvatar.position;
-	try{
+	MyAvatar.clearReferential();
+    try{
 		Script.update.disconnect(sittingDownAnimation);
 	} catch (e){}
 	Script.update.connect(standingUpAnimation);
@@ -158,11 +167,11 @@ function standUp() {
 var models = new Object();
 function SeatIndicator(modelProperties, seatIndex) {
     this.position =  Vec3.sum(modelProperties.position,
-                              Vec3.multiply(Vec3.multiplyQbyV(modelProperties.modelRotation,
+                              Vec3.multiply(Vec3.multiplyQbyV(modelProperties.rotation,
                                                               modelProperties.sittingPoints[seatIndex].position),
                                             modelProperties.radius));
                               
-    this.orientation = Quat.multiply(modelProperties.modelRotation,
+    this.orientation = Quat.multiply(modelProperties.rotation,
                                      modelProperties.sittingPoints[seatIndex].rotation);
     this.scale = MyAvatar.scale / 12;
     
@@ -197,8 +206,10 @@ Controller.mousePressEvent.connect(function(event) {
 	var clickedOverlay = Overlays.getOverlayAtPoint({x: event.x, y: event.y});
 
 	if (clickedOverlay == sitDownButton) {
+        seat.model = null;
 		sitDown();
 	} else if (clickedOverlay == standUpButton) {
+        seat.model = null;
 		standUp();
     } else {
        var pickRay = Camera.computePickRay(event.x, event.y);
@@ -214,6 +225,7 @@ Controller.mousePressEvent.connect(function(event) {
                                          model.properties.sittingPoints[i].indicator.position,
                                          model.properties.sittingPoints[i].indicator.scale / 2)) {
                    clickedOnSeat = true;
+                   seat.model = model;
                    seat.position = model.properties.sittingPoints[i].indicator.position;
                    seat.rotation = model.properties.sittingPoints[i].indicator.orientation;
                }
@@ -255,14 +267,24 @@ function update(deltaTime){
         }
         frame++;
     }
+
+    var locationChanged = false;
+    if (location.hostname != oldHost || !location.isConnected) {
+        for (model in models) {
+            removeIndicators(models[model]);
+        }
+        oldHost = location.hostname;
+        locationChanged = true;
+    }
 	
-    if (MyAvatar.position.x != avatarOldPosition.x &&
-        MyAvatar.position.y != avatarOldPosition.y &&
-        MyAvatar.position.z != avatarOldPosition.z) {
+    if (MyAvatar.position.x != avatarOldPosition.x ||
+        MyAvatar.position.y != avatarOldPosition.y ||
+        MyAvatar.position.z != avatarOldPosition.z ||
+        locationChanged) {
         avatarOldPosition = MyAvatar.position;
         
-        var SEARCH_RADIUS = 10;
-        var foundModels = Models.findModels(MyAvatar.position, SEARCH_RADIUS);
+        var SEARCH_RADIUS = 50;
+        var foundModels = Entities.findEntities(MyAvatar.position, SEARCH_RADIUS);
         // Let's remove indicator that got out of radius
         for (model in models) {
             if (Vec3.distance(models[model].properties.position, MyAvatar.position) > SEARCH_RADIUS) {
@@ -274,7 +296,10 @@ function update(deltaTime){
         for (var i = 0; i < foundModels.length; ++i) {
             var model = foundModels[i];
             if (typeof(models[model.id]) == "undefined") {
-                addIndicators(model);
+                model.properties = Entities.getEntityProperties(model);
+                if (Vec3.distance(model.properties.position, MyAvatar.position) < SEARCH_RADIUS) {
+                    addIndicators(model);
+                }
             }
         }
         
@@ -283,9 +308,9 @@ function update(deltaTime){
         }
     }
 }
+var oldHost = location.hostname;
 
 function addIndicators(modelID) {
-    modelID.properties = Models.getModelProperties(modelID);
     if (modelID.properties.sittingPoints.length > 0) {
         for (var i = 0; i < modelID.properties.sittingPoints.length; ++i) {
             modelID.properties.sittingPoints[i].indicator = new SeatIndicator(modelID.properties, i);
@@ -293,7 +318,7 @@ function addIndicators(modelID) {
         
         models[modelID.id] = modelID;
     } else {
-        Models.editModel(modelID, { glowLevel: 0.0 });
+        Entities.editEntity(modelID, { glowLevel: 0.0 });
     }
 }
 
@@ -341,6 +366,7 @@ Script.update.connect(update);
 Controller.keyPressEvent.connect(keyPressEvent);
 
 Script.scriptEnding.connect(function() {
+    MyAvatar.clearReferential();
 	for (var i = 0; i < pose.length; i++){
 		    MyAvatar.clearJointData(pose[i].joint);
 	}

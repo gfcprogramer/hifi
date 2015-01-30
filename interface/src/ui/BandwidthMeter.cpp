@@ -11,6 +11,9 @@
 
 #include <cstdio>
 
+#include <DependencyManager.h>
+#include <GeometryCache.h>
+
 #include "BandwidthMeter.h"
 #include "InterfaceConfig.h"
 
@@ -45,12 +48,12 @@ namespace { // .cpp-local
 BandwidthMeter::ChannelInfo BandwidthMeter::_CHANNELS[] = {
     { "Audio"   , "Kbps", 8000.0 / 1024.0, 0x33cc99ff },
     { "Avatars" , "Kbps", 8000.0 / 1024.0, 0xffef40c0 },
-    { "Voxels"  , "Kbps", 8000.0 / 1024.0, 0xd0d0d0a0 },
+    { "Octree"  , "Kbps", 8000.0 / 1024.0, 0xd0d0d0a0 },
     { "Metavoxels", "Kbps", 8000.0 / 1024.0, 0xd0d0d0a0 }
 };
 
 BandwidthMeter::BandwidthMeter() :
-    _textRenderer(INCONSOLATA_FONT_FAMILY, -1, QFont::Bold, false),
+    _textRenderer(TextRenderer::getInstance(INCONSOLATA_FONT_FAMILY, -1, INCONSOLATA_FONT_WEIGHT, false)),
     _scaleMaxIndex(INITIAL_SCALE_MAXIMUM_INDEX) {
 
     _channels = static_cast<ChannelInfo*>( malloc(sizeof(_CHANNELS)) );
@@ -83,30 +86,21 @@ void BandwidthMeter::Stream::updateValue(double amount) {
                       glm::clamp(dt / _msToAverage, 0.0, 1.0));
 }
 
-void BandwidthMeter::setColorRGBA(unsigned c) {
+glm::vec4 BandwidthMeter::getColorRGBA(unsigned c) {
 
-    glColor4ub(GLubyte( c >> 24), 
-               GLubyte((c >> 16) & 0xff),
-               GLubyte((c >>  8) & 0xff),
-               GLubyte( c        & 0xff));
+    float r = (c >> 24) / 255.0f;
+    float g = ((c >> 16) & 0xff) / 255.0f;
+    float b = ((c >>  8) & 0xff) / 255.0f;
+    float a = (c & 0xff) / 255.0f;
+    return glm::vec4(r,g,b,a);
 }
 
-void BandwidthMeter::renderBox(int x, int y, int w, int h) {
-
-    glBegin(GL_QUADS);
-    glVertex2i(x, y);
-    glVertex2i(x + w, y);
-    glVertex2i(x + w, y + h);
-    glVertex2i(x, y + h);
-    glEnd();
+void BandwidthMeter::renderBox(int x, int y, int w, int h, unsigned c) {
+    DependencyManager::get<GeometryCache>()->renderQuad(x, y, w, h, getColorRGBA(c));
 }
 
-void BandwidthMeter::renderVerticalLine(int x, int y, int h) {
-
-    glBegin(GL_LINES);
-    glVertex2i(x, y);
-    glVertex2i(x, y + h);
-    glEnd();
+void BandwidthMeter::renderVerticalLine(int x, int y, int h, unsigned c) {
+    DependencyManager::get<GeometryCache>()->renderLine(glm::vec2(x, y), glm::vec2(x, y + h), getColorRGBA(c));
 }
 
 inline int BandwidthMeter::centered(int subject, int object) {
@@ -140,7 +134,7 @@ void BandwidthMeter::render(int screenWidth, int screenHeight) {
     float totalMax = glm::max(totalIn, totalOut);
 
     // Get font / caption metrics
-    QFontMetrics const& fontMetrics = _textRenderer.metrics();
+    QFontMetrics const& fontMetrics = _textRenderer->metrics();
     int fontDescent = fontMetrics.descent(); 
     int labelWidthIn = fontMetrics.width(CAPTION_IN);
     int labelWidthOut = fontMetrics.width(CAPTION_OUT);
@@ -162,15 +156,16 @@ void BandwidthMeter::render(int screenWidth, int screenHeight) {
     glTranslatef((float)barX, (float)y, 0.0f);
 
     // Render captions
-    setColorRGBA(COLOR_TEXT);
-    _textRenderer.draw(barWidth + SPACING_LEFT_CAPTION_UNIT, textYcenteredLine, CAPTION_UNIT);
-    _textRenderer.draw(-labelWidthIn - SPACING_RIGHT_CAPTION_IN_OUT, textYupperLine, CAPTION_IN);
-    _textRenderer.draw(-labelWidthOut - SPACING_RIGHT_CAPTION_IN_OUT, textYlowerLine, CAPTION_OUT);
+    glm::vec4 textColor = getColorRGBA(COLOR_TEXT);
+    _textRenderer->draw(barWidth + SPACING_LEFT_CAPTION_UNIT, textYcenteredLine, CAPTION_UNIT, textColor);
+    _textRenderer->draw(-labelWidthIn - SPACING_RIGHT_CAPTION_IN_OUT, textYupperLine, CAPTION_IN, textColor);
+    _textRenderer->draw(-labelWidthOut - SPACING_RIGHT_CAPTION_IN_OUT, textYlowerLine, CAPTION_OUT, textColor);
 
     // Render vertical lines for the frame
-    setColorRGBA(COLOR_FRAME);
-    renderVerticalLine(0, 0, h);
-    renderVerticalLine(barWidth, 0, h);
+    // TODO: I think there may be a bug in this newest code and/or the GeometryCache code, because it seems like
+    // sometimes the bandwidth meter doesn't render the vertical lines
+    renderVerticalLine(0, 0, h, COLOR_FRAME);
+    renderVerticalLine(barWidth, 0, h, COLOR_FRAME);
 
     // Adjust scale
     int steps;
@@ -199,9 +194,8 @@ void BandwidthMeter::render(int screenWidth, int screenHeight) {
     }
     
     // Render scale indicators
-    setColorRGBA(COLOR_INDICATOR);
     for (int j = NUMBER_OF_MARKERS; --j > 0;) {
-        renderVerticalLine((barWidth * j) / NUMBER_OF_MARKERS, 0, h);
+        renderVerticalLine((barWidth * j) / NUMBER_OF_MARKERS, 0, h, COLOR_INDICATOR);
     }
 
     // Render bars
@@ -212,30 +206,27 @@ void BandwidthMeter::render(int screenWidth, int screenHeight) {
         int wIn = (int)(barWidth * inputStream(chIdx).getValue() * UNIT_SCALE / scaleMax);
         int wOut = (int)(barWidth * outputStream(chIdx).getValue() * UNIT_SCALE / scaleMax);
 
-        setColorRGBA(channelInfo(chIdx).colorRGBA);
-
         if (wIn > 0) {
-            renderBox(xIn, 0, wIn, barHeight);
+            renderBox(xIn, 0, wIn, barHeight, channelInfo(chIdx).colorRGBA);
         }
         xIn += wIn;
 
         if (wOut > 0) {
-            renderBox(xOut, h - barHeight, wOut, barHeight);
+            renderBox(xOut, h - barHeight, wOut, barHeight, channelInfo(chIdx).colorRGBA);
         }
         xOut += wOut;
     }
 
     // Render numbers
     char fmtBuf[8];
-    setColorRGBA(COLOR_TEXT);
     sprintf(fmtBuf, "%0.1f", totalIn);
-    _textRenderer.draw(glm::max(xIn - fontMetrics.width(fmtBuf) - PADDING_HORIZ_VALUE,
+    _textRenderer->draw(glm::max(xIn - fontMetrics.width(fmtBuf) - PADDING_HORIZ_VALUE,
                                 PADDING_HORIZ_VALUE),
-                       textYupperLine, fmtBuf);
+                       textYupperLine, fmtBuf, textColor);
     sprintf(fmtBuf, "%0.1f", totalOut);
-    _textRenderer.draw(glm::max(xOut - fontMetrics.width(fmtBuf) - PADDING_HORIZ_VALUE,
+    _textRenderer->draw(glm::max(xOut - fontMetrics.width(fmtBuf) - PADDING_HORIZ_VALUE,
                                 PADDING_HORIZ_VALUE),
-                       textYlowerLine, fmtBuf);
+                       textYlowerLine, fmtBuf, textColor);
 
     glPopMatrix();
 

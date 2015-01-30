@@ -5,12 +5,15 @@
 //  Created by Ryan Huffman on 05/14/14.
 //  Copyright 2014 High Fidelity, Inc.
 //
-//  This class draws a border around the different Voxel, Model, and Particle nodes on the current domain,
+//  This class draws a border around the different Entity nodes on the current domain,
 //  and a semi-transparent cube around the currently mouse-overed node.
 //
 //  Distributed under the Apache License, Version 2.0.
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
+
+#include <DependencyManager.h>
+#include <GeometryCache.h>
 
 #include "Application.h"
 #include "Util.h"
@@ -19,33 +22,25 @@
 
 NodeBounds::NodeBounds(QObject* parent) :
     QObject(parent),
-    _showVoxelNodes(false),
-    _showModelNodes(false),
-    _showParticleNodes(false),
+    _showEntityNodes(false),
     _overlayText() {
 
 }
 
 void NodeBounds::draw() {
-    if (!(_showVoxelNodes || _showModelNodes || _showParticleNodes)) {
+    if (!_showEntityNodes) {
         _overlayText[0] = '\0';
         return;
     }
 
-    NodeToJurisdictionMap& voxelServerJurisdictions = Application::getInstance()->getVoxelServerJurisdictions();
-    NodeToJurisdictionMap& modelServerJurisdictions = Application::getInstance()->getModelServerJurisdictions();
-    NodeToJurisdictionMap& particleServerJurisdictions = Application::getInstance()->getParticleServerJurisdictions();
+    NodeToJurisdictionMap& entityServerJurisdictions = Application::getInstance()->getEntityServerJurisdictions();
     NodeToJurisdictionMap* serverJurisdictions;
 
     // Compute ray to find selected nodes later on.  We can't use the pre-computed ray in Application because it centers
     // itself after the cursor disappears.
     Application* application = Application::getInstance();
-    QGLWidget* glWidget = application->getGLWidget();
-    float mouseX = application->getMouseX() / (float)glWidget->width();
-    float mouseY = application->getMouseY() / (float)glWidget->height();
-    glm::vec3 mouseRayOrigin;
-    glm::vec3 mouseRayDirection;
-    application->getViewFrustum()->computePickRay(mouseX, mouseY, mouseRayOrigin, mouseRayDirection);
+    PickRay pickRay = application->getCamera()->computePickRay(application->getTrueMouseX(),
+                                                               application->getTrueMouseY());
 
     // Variables to keep track of the selected node and properties to draw the cube later if needed
     Node* selectedNode = NULL;
@@ -54,67 +49,57 @@ void NodeBounds::draw() {
     glm::vec3 selectedCenter;
     float selectedScale = 0;
 
-    NodeList* nodeList = NodeList::getInstance();
-
-    foreach (const SharedNodePointer& node, nodeList->getNodeHash()) {
+    auto nodeList = DependencyManager::get<NodeList>();
+    nodeList->eachNode([&](const SharedNodePointer& node){
         NodeType_t nodeType = node->getType();
-
-        if (nodeType == NodeType::VoxelServer && _showVoxelNodes) {
-            serverJurisdictions = &voxelServerJurisdictions;
-        } else if (nodeType == NodeType::ModelServer && _showModelNodes) {
-            serverJurisdictions = &modelServerJurisdictions;
-        } else if (nodeType == NodeType::ParticleServer && _showParticleNodes) {
-            serverJurisdictions = &particleServerJurisdictions;
+        
+        if (nodeType == NodeType::EntityServer && _showEntityNodes) {
+            serverJurisdictions = &entityServerJurisdictions;
         } else {
-            continue;
+            return;
         }
-
+        
         QUuid nodeUUID = node->getUUID();
         serverJurisdictions->lockForRead();
         if (serverJurisdictions->find(nodeUUID) != serverJurisdictions->end()) {
             const JurisdictionMap& map = (*serverJurisdictions)[nodeUUID];
-
+            
             unsigned char* rootCode = map.getRootOctalCode();
-
+            
             if (rootCode) {
                 VoxelPositionSize rootDetails;
                 voxelDetailsForCode(rootCode, rootDetails);
                 serverJurisdictions->unlock();
                 glm::vec3 location(rootDetails.x, rootDetails.y, rootDetails.z);
                 location *= (float)TREE_SCALE;
-
+                
                 AACube serverBounds(location, rootDetails.s * TREE_SCALE);
-
+                
                 glm::vec3 center = serverBounds.getVertex(BOTTOM_RIGHT_NEAR)
-                    + ((serverBounds.getVertex(TOP_LEFT_FAR) - serverBounds.getVertex(BOTTOM_RIGHT_NEAR)) / 2.0f);
-
-                const float VOXEL_NODE_SCALE = 1.00f;
-                const float MODEL_NODE_SCALE = 0.99f;
-                const float PARTICLE_NODE_SCALE = 0.98f;
-
+                + ((serverBounds.getVertex(TOP_LEFT_FAR) - serverBounds.getVertex(BOTTOM_RIGHT_NEAR)) / 2.0f);
+                
+                const float ENTITY_NODE_SCALE = 0.99f;
+                
                 float scaleFactor = rootDetails.s * TREE_SCALE;
-
+                
                 // Scale by 0.92 - 1.00 depending on the scale of the node.  This allows smaller nodes to scale in
                 // a bit and not overlap larger nodes.
                 scaleFactor *= 0.92 + (rootDetails.s * 0.08);
-
+                
                 // Scale different node types slightly differently because it's common for them to overlap.
-                if (nodeType == NodeType::VoxelServer) {
-                    scaleFactor *= VOXEL_NODE_SCALE;
-                } else if (nodeType == NodeType::ModelServer) {
-                    scaleFactor *= MODEL_NODE_SCALE;
-                } else {
-                    scaleFactor *= PARTICLE_NODE_SCALE;
+                if (nodeType == NodeType::EntityServer) {
+                    scaleFactor *= ENTITY_NODE_SCALE;
                 }
-
+                
                 float red, green, blue;
                 getColorForNodeType(nodeType, red, green, blue);
                 drawNodeBorder(center, scaleFactor, red, green, blue);
-
+                
                 float distance;
                 BoxFace face;
-                bool inside = serverBounds.contains(mouseRayOrigin);
-                bool colliding = serverBounds.findRayIntersection(mouseRayOrigin, mouseRayDirection, distance, face);
+                
+                bool inside = serverBounds.contains(pickRay.origin);
+                bool colliding = serverBounds.findRayIntersection(pickRay.origin, pickRay.direction, distance, face);
 
                 // If the camera is inside a node it will be "selected" if you don't have your cursor over another node
                 // that you aren't inside.
@@ -131,7 +116,7 @@ void NodeBounds::draw() {
         } else {
             serverJurisdictions->unlock();
         }
-    }
+    });
 
     if (selectedNode) {
         glPushMatrix();
@@ -142,8 +127,7 @@ void NodeBounds::draw() {
         float red, green, blue;
         getColorForNodeType(selectedNode->getType(), red, green, blue);
 
-        glColor4f(red, green, blue, 0.2f);
-        glutSolidCube(1.0);
+        DependencyManager::get<GeometryCache>()->renderSolidCube(1.0f, glm::vec4(red, green, blue, 0.2f));
 
         glPopMatrix();
 
@@ -164,59 +148,17 @@ void NodeBounds::draw() {
 
 void NodeBounds::drawNodeBorder(const glm::vec3& center, float scale, float red, float green, float blue) {
     glPushMatrix();
-
     glTranslatef(center.x, center.y, center.z);
     glScalef(scale, scale, scale);
-
     glLineWidth(2.5);
-    glColor3f(red, green, blue);
-    glBegin(GL_LINES);
-
-    glVertex3f(-0.5, -0.5, -0.5);
-    glVertex3f( 0.5, -0.5, -0.5);
-
-    glVertex3f(-0.5, -0.5, -0.5);
-    glVertex3f(-0.5,  0.5, -0.5);
-
-    glVertex3f(-0.5, -0.5, -0.5);
-    glVertex3f(-0.5, -0.5,  0.5);
-
-    glVertex3f(-0.5,  0.5, -0.5);
-    glVertex3f( 0.5,  0.5, -0.5);
-
-    glVertex3f(-0.5,  0.5, -0.5);
-    glVertex3f(-0.5,  0.5,  0.5);
-
-    glVertex3f( 0.5,  0.5,  0.5);
-    glVertex3f(-0.5,  0.5,  0.5);
-
-    glVertex3f( 0.5,  0.5,  0.5);
-    glVertex3f( 0.5, -0.5,  0.5);
-
-    glVertex3f( 0.5,  0.5,  0.5);
-    glVertex3f( 0.5,  0.5, -0.5);
-
-    glVertex3f( 0.5, -0.5,  0.5);
-    glVertex3f(-0.5, -0.5,  0.5);
-
-    glVertex3f( 0.5, -0.5,  0.5);
-    glVertex3f( 0.5, -0.5, -0.5);
-
-    glVertex3f( 0.5,  0.5, -0.5);
-    glVertex3f( 0.5, -0.5, -0.5);
-
-    glVertex3f(-0.5,  0.5,  0.5);
-    glVertex3f(-0.5, -0.5,  0.5);
-
-    glEnd();
-
+    DependencyManager::get<GeometryCache>()->renderWireCube(1.0f, glm::vec4(red, green, blue, 1.0f));
     glPopMatrix();
 }
 
 void NodeBounds::getColorForNodeType(NodeType_t nodeType, float& red, float& green, float& blue) {
-    red = nodeType == NodeType::VoxelServer ? 1.0 : 0.0;
-    green = nodeType == NodeType::ParticleServer ? 1.0 : 0.0;
-    blue = nodeType == NodeType::ModelServer ? 1.0 : 0.0;
+    red = nodeType == 0.0;
+    green = 0.0;
+    blue = nodeType == NodeType::EntityServer ? 1.0 : 0.0;
 }
 
 void NodeBounds::drawOverlay() {
@@ -232,12 +174,13 @@ void NodeBounds::drawOverlay() {
         const int MOUSE_OFFSET = 10;
         const int BACKGROUND_BEVEL = 3;
 
-        int mouseX = application->getMouseX(),
-            mouseY = application->getMouseY(),
+        int mouseX = application->getTrueMouseX(),
+            mouseY = application->getTrueMouseY(),
             textWidth = widthText(TEXT_SCALE, 0, _overlayText);
-        glColor4f(0.4f, 0.4f, 0.4f, 0.6f);
-        renderBevelCornersRect(mouseX + MOUSE_OFFSET, mouseY - TEXT_HEIGHT - PADDING,
-                               textWidth + (2 * PADDING), TEXT_HEIGHT + (2 * PADDING), BACKGROUND_BEVEL);
+        DependencyManager::get<GeometryCache>()->renderBevelCornersRect(
+                                mouseX + MOUSE_OFFSET, mouseY - TEXT_HEIGHT - PADDING,
+                                textWidth + (2 * PADDING), TEXT_HEIGHT + (2 * PADDING), BACKGROUND_BEVEL,
+                                glm::vec4(0.4f, 0.4f, 0.4f, 0.6f));
         drawText(mouseX + MOUSE_OFFSET + PADDING, mouseY, TEXT_SCALE, ROTATION, FONT, _overlayText, TEXT_COLOR);
     }
 }

@@ -21,6 +21,7 @@
 #include "AvatarData.h"
 
 typedef QSharedPointer<AvatarData> AvatarSharedPointer;
+typedef QWeakPointer<AvatarData> AvatarWeakPointer;
 typedef QHash<QUuid, AvatarSharedPointer> AvatarHash;
 
 class AvatarHashMap : public QObject {
@@ -30,13 +31,15 @@ public:
     
     const AvatarHash& getAvatarHash() { return _avatarHash; }
     int size() const { return _avatarHash.size(); }
-
-    virtual void insert(const QUuid& id, AvatarSharedPointer avatar);
     
 public slots:
     void processAvatarMixerDatagram(const QByteArray& datagram, const QWeakPointer<Node>& mixerWeakPointer);
     bool containsAvatarWithDisplayName(const QString& displayName);
-
+    AvatarData* avatarWithDisplayName(const QString& displayname);
+    
+private slots:
+    void sessionUUIDChanged(const QUuid& sessionUUID, const QUuid& oldUUID);
+    
 protected:
     virtual AvatarHash::iterator erase(const AvatarHash::iterator& iterator);
     
@@ -51,6 +54,7 @@ protected:
     void processKillAvatar(const QByteArray& datagram);
 
     AvatarHash _avatarHash;
+    QUuid _lastOwnerSessionUUID;
 };
 
 #endif // hifi_AvatarHashMap_h

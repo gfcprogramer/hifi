@@ -12,10 +12,14 @@
 #ifndef hifi_MetavoxelClientManager_h
 #define hifi_MetavoxelClientManager_h
 
+#include <QReadWriteLock>
+#include <QTimer>
+
 #include "Endpoint.h"
 
 class MetavoxelClient;
 class MetavoxelEditMessage;
+class MetavoxelUpdater;
 
 /// Manages the set of connected metavoxel clients.
 class MetavoxelClientManager : public QObject {
@@ -23,28 +27,75 @@ class MetavoxelClientManager : public QObject {
 
 public:
 
+    MetavoxelClientManager();
+    virtual ~MetavoxelClientManager();
+
     virtual void init();
-    void update();
+
+    MetavoxelUpdater* getUpdater() const { return _updater; }
 
     SharedObjectPointer findFirstRaySpannerIntersection(const glm::vec3& origin, const glm::vec3& direction,
         const AttributePointer& attribute, float& distance);
+    
+    bool findFirstRayHeightfieldIntersection(const glm::vec3& origin, const glm::vec3& direction, float& distance);
 
-    Q_INVOKABLE void setSphere(const glm::vec3& center, float radius, const QColor& color = QColor(Qt::gray));
+    Q_INVOKABLE float getHeightfieldHeight(const glm::vec3& location);
 
-    Q_INVOKABLE void setSpanner(const SharedObjectPointer& object, bool reliable = false);
-        
+    Q_INVOKABLE void paintHeightfieldHeight(const glm::vec3& position, float radius, float height);
+
     Q_INVOKABLE void applyEdit(const MetavoxelEditMessage& edit, bool reliable = false);
 
-    virtual MetavoxelLOD getLOD() const;
+    /// Returns the current LOD.  This must be thread-safe, as it will be called from the updater thread.
+    virtual MetavoxelLOD getLOD();
     
 private slots:
 
     void maybeAttachClient(const SharedNodePointer& node);
-
+    void maybeDeleteClient(const SharedNodePointer& node);
+    
 protected:
     
     virtual MetavoxelClient* createClient(const SharedNodePointer& node);
-    virtual void updateClient(MetavoxelClient* client);
+    
+    void guide(MetavoxelVisitor& visitor);
+    
+    MetavoxelUpdater* _updater;
+};
+
+/// Handles updates in a dedicated thread.
+class MetavoxelUpdater : public QObject {
+    Q_OBJECT
+
+public:
+    
+    MetavoxelUpdater(MetavoxelClientManager* clientManager);
+    
+    const MetavoxelLOD& getLOD() const { return _lod; }
+    
+    Q_INVOKABLE void start();
+    
+    Q_INVOKABLE void addClient(QObject* client);
+    
+    Q_INVOKABLE void applyEdit(const MetavoxelEditMessage& edit, bool reliable);
+    
+    /// Requests a set of statistics.  The receiving method should take six integer arguments: internal node count, leaf count,
+    /// send progress, send total, receive progress, receive total.
+    Q_INVOKABLE void getStats(QObject* receiver, const QByteArray& method);
+    
+private slots:
+    
+    void sendUpdates();    
+    void removeClient(QObject* client);
+    
+private:
+    
+    MetavoxelClientManager* _clientManager;
+    QSet<MetavoxelClient*> _clients;
+    
+    QTimer _sendTimer;
+    qint64 _lastSend;
+    
+    MetavoxelLOD _lod;
 };
 
 /// Base class for metavoxel clients.
@@ -53,25 +104,35 @@ class MetavoxelClient : public Endpoint {
 
 public:
     
-    MetavoxelClient(const SharedNodePointer& node, MetavoxelClientManager* manager);
+    MetavoxelClient(const SharedNodePointer& node, MetavoxelUpdater* updater);
 
-    MetavoxelData& getData() { return _data; }
+    /// Returns a reference to the most recent data.  This function is *not* thread-safe.
+    const MetavoxelData& getData() const { return _data; }
 
-    void guide(MetavoxelVisitor& visitor);
-    
+    /// Returns a copy of the most recent data.  This function *is* thread-safe.
+    MetavoxelData getDataCopy();
+
     void applyEdit(const MetavoxelEditMessage& edit, bool reliable = false);
 
 protected:
 
+    PacketRecord* getAcknowledgedSendRecord(int packetNumber) const;
+    PacketRecord* getAcknowledgedReceiveRecord(int packetNumber) const;
+
+    virtual void dataChanged(const MetavoxelData& oldData);
+
+    virtual void recordReceive();
+    
+    virtual void clearSendRecordsBefore(int index);
+    virtual void clearReceiveRecordsBefore(int index);
+    
     virtual void writeUpdateMessage(Bitstream& out);
     virtual void handleMessage(const QVariant& message, Bitstream& in);
 
     virtual PacketRecord* maybeCreateSendRecord() const;
     virtual PacketRecord* maybeCreateReceiveRecord() const;
 
-private:
-    
-    MetavoxelClientManager* _manager;
+    MetavoxelUpdater* _updater;
     MetavoxelData _data;
     MetavoxelData _remoteData;
     MetavoxelLOD _remoteDataLOD;
@@ -79,6 +140,18 @@ private:
     ReliableChannel* _reliableDeltaChannel;
     MetavoxelLOD _reliableDeltaLOD;
     int _reliableDeltaID;
+    QVariant _reliableDeltaMessage;
+    
+    MetavoxelData _dataCopy;
+    QReadWriteLock _dataCopyLock;
+    
+    QDataStream _dummyDataStream;
+    Bitstream _dummyInputStream;
+    int _dummyPacketNumber;
+    QList<PacketRecord*> _clearedSendRecords;
+    
+    typedef QPair<PacketRecord*, Bitstream::ReadMappings> ClearedReceiveRecord;
+    QList<ClearedReceiveRecord> _clearedReceiveRecords;
 };
 
 #endif // hifi_MetavoxelClientManager_h

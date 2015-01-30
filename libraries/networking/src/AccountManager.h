@@ -37,29 +37,42 @@ public:
     QString updateSlot;
 };
 
+const QByteArray ACCESS_TOKEN_AUTHORIZATION_HEADER = "Authorization";
+
 class AccountManager : public QObject {
     Q_OBJECT
 public:
-    static AccountManager& getInstance();
+    static AccountManager& getInstance(bool forceReset = false);
 
     void authenticatedRequest(const QString& path,
                               QNetworkAccessManager::Operation operation = QNetworkAccessManager::GetOperation,
                               const JSONCallbackParameters& callbackParams = JSONCallbackParameters(),
                               const QByteArray& dataByteArray = QByteArray(),
-                              QHttpMultiPart* dataMultiPart = NULL);
+                              QHttpMultiPart* dataMultiPart = NULL,
+                              const QVariantMap& propertyMap = QVariantMap());
+    
+    void unauthenticatedRequest(const QString& path,
+                                QNetworkAccessManager::Operation operation = QNetworkAccessManager::GetOperation,
+                                const JSONCallbackParameters& callbackParams = JSONCallbackParameters(),
+                                const QByteArray& dataByteArray = QByteArray(),
+                                QHttpMultiPart* dataMultiPart = NULL,
+                                const QVariantMap& propertyMap = QVariantMap()) ;
 
     const QUrl& getAuthURL() const { return _authURL; }
     void setAuthURL(const QUrl& authURL);
     bool hasAuthEndpoint() { return !_authURL.isEmpty(); }
+    
+    void disableSettingsFilePersistence() { _shouldPersistToSettingsFile = false; }
 
     bool isLoggedIn() { return !_authURL.isEmpty() && hasValidAccessToken(); }
     bool hasValidAccessToken();
     Q_INVOKABLE bool checkAndSignalForAccessToken();
+    void setAccessTokenForCurrentAuthURL(const QString& accessToken);
 
     void requestAccessToken(const QString& login, const QString& password);
     void requestProfile();
 
-    const DataServerAccountInfo& getAccountInfo() const { return _accountInfo; }
+    DataServerAccountInfo& getAccountInfo() { return _accountInfo; }
 
 public slots:
     void requestAccessTokenFinished();
@@ -69,6 +82,7 @@ public slots:
     void logout();
     void updateBalance();
     void accountInfoBalanceChanged(qint64 newBalance);
+    void generateNewKeypair();
 signals:
     void authRequired();
     void authEndpointChanged();
@@ -80,23 +94,31 @@ signals:
     void balanceChanged(qint64 newBalance);
 private slots:
     void processReply();
+    void handleKeypairGenerationError();
+    void processGeneratedKeypair(const QByteArray& publicKey, const QByteArray& privateKey);
 private:
     AccountManager();
     AccountManager(AccountManager const& other); // not implemented
     void operator=(AccountManager const& other); // not implemented
+    
+    void persistAccountToSettings();
 
     void passSuccessToCallback(QNetworkReply* reply);
     void passErrorToCallback(QNetworkReply* reply);
 
-    Q_INVOKABLE void invokedRequest(const QString& path, QNetworkAccessManager::Operation operation,
+    Q_INVOKABLE void invokedRequest(const QString& path,
+                                    bool requiresAuthentication,
+                                    QNetworkAccessManager::Operation operation,
                                     const JSONCallbackParameters& callbackParams,
                                     const QByteArray& dataByteArray,
-                                    QHttpMultiPart* dataMultiPart);
+                                    QHttpMultiPart* dataMultiPart,
+                                    const QVariantMap& propertyMap);
 
     QUrl _authURL;
     QMap<QNetworkReply*, JSONCallbackParameters> _pendingCallbackMap;
 
     DataServerAccountInfo _accountInfo;
+    bool _shouldPersistToSettingsFile;
 };
 
 #endif // hifi_AccountManager_h

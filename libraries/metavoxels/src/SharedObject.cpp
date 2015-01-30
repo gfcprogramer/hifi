@@ -23,7 +23,7 @@
 REGISTER_META_OBJECT(SharedObject)
 
 SharedObject::SharedObject() :
-    _id(++_lastID),
+    _id(_nextID.fetchAndAddOrdered(1)),
     _originID(_id),
     _remoteID(0),
     _remoteOriginID(0) {
@@ -131,7 +131,31 @@ void SharedObject::dump(QDebug debug) const {
     }
 }
 
-int SharedObject::_lastID = 0;
+void SharedObject::writeExtra(Bitstream& out) const {
+    // nothing by default
+}
+
+void SharedObject::readExtra(Bitstream& in, bool reread) {
+    // nothing by default
+}
+
+void SharedObject::writeExtraDelta(Bitstream& out, const SharedObject* reference) const {
+    // nothing by default
+}
+
+void SharedObject::readExtraDelta(Bitstream& in, const SharedObject* reference, bool reread) {
+    // nothing by default
+}
+
+void SharedObject::maybeWriteSubdivision(Bitstream& out) {
+    // nothing by default
+}
+
+SharedObject* SharedObject::readSubdivision(Bitstream& in) {
+    return this;
+}
+
+QAtomicInt SharedObject::_nextID(1);
 WeakSharedObjectHash SharedObject::_weakHash;
 QReadWriteLock SharedObject::_weakHashLock;
 
@@ -158,7 +182,7 @@ SharedObjectEditor::SharedObjectEditor(const QMetaObject* metaObject, bool nulla
         _type->addItem("(none)");
     }
     foreach (const QMetaObject* metaObject, Bitstream::getMetaObjectSubClasses(metaObject)) {
-        // add add constructable subclasses
+        // add constructable subclasses
         if (metaObject->constructorCount() > 0) {
             _type->addItem(metaObject->className(), QVariant::fromValue(metaObject));
         }
@@ -193,7 +217,9 @@ void SharedObjectEditor::detachObject() {
     for (int i = 0; i < form->rowCount(); i++) {
         QWidget* widget = form->itemAt(i, QFormLayout::FieldRole)->widget();
         QMetaProperty property = metaObject->property(widget->property("propertyIndex").toInt());
-        connect(_object.data(), signal(property.notifySignal().methodSignature()), SLOT(updateProperty()));
+        if (property.hasNotifySignal()) {
+            connect(_object.data(), signal(property.notifySignal().methodSignature()), SLOT(updateProperty()));
+        }
     }
 }
 
@@ -226,6 +252,7 @@ void SharedObjectEditor::updateType() {
     const QMetaObject* metaObject = _type->itemData(_type->currentIndex()).value<const QMetaObject*>();
     if (!metaObject) {
         _object.reset();
+        emit objectChanged(_object);
         return;
     }
     QObject* newObject = metaObject->newInstance();
@@ -259,7 +286,7 @@ void SharedObjectEditor::updateType() {
             }
         }
     }
-    _object = static_cast<SharedObject*>(newObject);
+    emit objectChanged(_object = static_cast<SharedObject*>(newObject));
 }
 
 void SharedObjectEditor::propertyChanged() {
@@ -275,6 +302,7 @@ void SharedObjectEditor::propertyChanged() {
         QByteArray valuePropertyName = QItemEditorFactory::defaultFactory()->valuePropertyName(property.userType());
         property.write(object, widget->property(valuePropertyName));
     }
+    emit objectChanged(_object);
 }
 
 void SharedObjectEditor::updateProperty() {

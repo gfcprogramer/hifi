@@ -18,15 +18,14 @@
 #include <QSortFilterProxyModel>
 
 #include "ScriptsModel.h"
-#include "FramelessDialog.h"
+#include "ScriptsModelFilter.h"
 #include "ScriptsTableWidget.h"
 
 namespace Ui {
     class RunningScriptsWidget;
 }
 
-class RunningScriptsWidget : public FramelessDialog
-{
+class RunningScriptsWidget : public QWidget {
     Q_OBJECT
 public:
     explicit RunningScriptsWidget(QWidget* parent = NULL);
@@ -45,7 +44,6 @@ protected:
 
 public slots:
     void scriptStopped(const QString& scriptName);
-    void setBoundary(const QRect& rect);
 
 private slots:
     void allScriptsStopped();
@@ -57,12 +55,11 @@ private slots:
 private:
     Ui::RunningScriptsWidget* ui;
     QSignalMapper _signalMapper;
-    QSortFilterProxyModel _proxyModel;
+    ScriptsModelFilter _scriptsModelFilter;
     ScriptsModel _scriptsModel;
     ScriptsTableWidget* _recentlyLoadedScriptsTable;
     QStringList _recentlyLoadedScripts;
     QString _lastStoppedScript;
-    QRect _boundary;
 };
 
 #endif // hifi_RunningScriptsWidget_h

@@ -22,7 +22,7 @@
 #include <AudioScriptingInterface.h>
 #include <AvatarData.h>
 #include <AvatarHashMap.h>
-#include <VoxelsScriptingInterface.h>
+#include <LimitedNodeList.h>
 
 #include "AbstractControllerScriptingInterface.h"
 #include "ArrayBufferClass.h"
@@ -30,9 +30,7 @@
 #include "ScriptUUID.h"
 #include "Vec3.h"
 
-class ModelsScriptingInterface;
-class ParticlesScriptingInterface;
-class VoxelsScriptingInterface;
+class EntityScriptingInterface;
 
 const QString NO_SCRIPT("");
 
@@ -41,21 +39,12 @@ const unsigned int SCRIPT_DATA_CALLBACK_USECS = floor(((1.0 / 60.0f) * 1000 * 10
 class ScriptEngine : public QScriptEngine {
     Q_OBJECT
 public:
-    ScriptEngine(const QUrl& scriptURL,
-                 AbstractControllerScriptingInterface* controllerScriptingInterface = NULL);
-
     ScriptEngine(const QString& scriptContents = NO_SCRIPT,
                  const QString& fileNameString = QString(""),
                  AbstractControllerScriptingInterface* controllerScriptingInterface = NULL);
 
-    /// Access the VoxelsScriptingInterface in order to initialize it with a custom packet sender and jurisdiction listener
-    static VoxelsScriptingInterface* getVoxelsScriptingInterface() { return &_voxelsScriptingInterface; }
-
-    /// Access the ParticlesScriptingInterface in order to initialize it with a custom packet sender and jurisdiction listener
-    static ParticlesScriptingInterface* getParticlesScriptingInterface() { return &_particlesScriptingInterface; }
-
-    /// Access the ModelsScriptingInterface in order to initialize it with a custom packet sender and jurisdiction listener
-    static ModelsScriptingInterface* getModelsScriptingInterface() { return &_modelsScriptingInterface; }
+    /// Access the EntityScriptingInterface in order to initialize it with a custom packet sender and jurisdiction listener
+    static EntityScriptingInterface* getEntityScriptingInterface() { return &_entityScriptingInterface; }
 
     ArrayBufferClass* getArrayBufferClass() { return _arrayBufferClass; }
     
@@ -68,6 +57,7 @@ public:
     QScriptValue registerGlobalObject(const QString& name, QObject* object); /// registers a global object by name
     void registerGetterSetter(const QString& name, QScriptEngine::FunctionSignature getter,
                               QScriptEngine::FunctionSignature setter, QScriptValue object = QScriptValue::NullValue);
+    void registerFunction(const QString& name, QScriptEngine::FunctionSignature fun, int numArguments = -1);
 
     Q_INVOKABLE void setIsAvatar(bool isAvatar);
     bool isAvatar() const { return _isAvatar; }
@@ -92,7 +82,13 @@ public:
     bool isFinished() const { return _isFinished; }
     bool isRunning() const { return _isRunning; }
 
+    void setUserLoaded(bool isUserLoaded) { _isUserLoaded = isUserLoaded;  }
+    bool isUserLoaded() const { return _isUserLoaded; }
+
+    void setParentURL(const QString& parentURL) { _parentURL = parentURL;  }
+
 public slots:
+    void loadURL(const QUrl& scriptURL);
     void stop();
 
     QScriptValue evaluate(const QString& program, const QString& fileName = QString(), int lineNumber = 1);
@@ -100,12 +96,17 @@ public slots:
     QObject* setTimeout(const QScriptValue& function, int timeoutMS);
     void clearInterval(QObject* timer) { stopTimer(reinterpret_cast<QTimer*>(timer)); }
     void clearTimeout(QObject* timer) { stopTimer(reinterpret_cast<QTimer*>(timer)); }
-    void include(const QString& includeFile);
+    void include(const QStringList& includeFiles, QScriptValue callback = QScriptValue());
+    void include(const QString& includeFile, QScriptValue callback = QScriptValue());
+    void load(const QString& loadfile);
     void print(const QString& message);
+    QUrl resolvePath(const QString& path) const;
 
     void nodeKilled(SharedNodePointer node);
 
 signals:
+    void scriptLoaded(const QString& scriptFilename);
+    void errorLoadingScript(const QString& scriptFilename);
     void update(float deltaTime);
     void scriptEnding();
     void finished(const QString& fileNameString);
@@ -114,9 +115,11 @@ signals:
     void errorMessage(const QString& message);
     void runningStateChanged();
     void evaluationFinished(QScriptValue result, bool isException);
+    void loadScript(const QString& scriptName, bool isUserLoaded);
 
 protected:
     QString _scriptContents;
+    QString _parentURL;
     bool _isFinished;
     bool _isRunning;
     bool _isInitialized;
@@ -129,30 +132,28 @@ protected:
     int _numAvatarSoundSentBytes;
 
 private:
-    QUrl resolveInclude(const QString& include) const;
     void sendAvatarIdentityPacket();
     void sendAvatarBillboardPacket();
 
     QObject* setupTimerWithInterval(const QScriptValue& function, int intervalMS, bool isSingleShot);
     void stopTimer(QTimer* timer);
 
-    static VoxelsScriptingInterface _voxelsScriptingInterface;
-    static ParticlesScriptingInterface _particlesScriptingInterface;
-    static ModelsScriptingInterface _modelsScriptingInterface;
+    static EntityScriptingInterface _entityScriptingInterface;
 
     AbstractControllerScriptingInterface* _controllerScriptingInterface;
-    AudioScriptingInterface _audioScriptingInterface;
     AvatarData* _avatarData;
     QString _scriptName;
     QString _fileNameString;
     Quat _quatLibrary;
     Vec3 _vec3Library;
     ScriptUUID _uuidLibrary;
-    AnimationCache _animationCache;
-    
+    bool _isUserLoaded;
+
     ArrayBufferClass* _arrayBufferClass;
 
     QHash<QUuid, quint16> _outgoingScriptAudioSequenceNumbers;
+private slots:
+    void handleScriptDownload();
 };
 
 #endif // hifi_ScriptEngine_h

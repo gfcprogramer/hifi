@@ -9,8 +9,9 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
-#include "CollisionInfo.h"
 
+
+#include "CollisionInfo.h"
 #include "Shape.h"
 #include "SharedUtil.h"
 
@@ -19,11 +20,21 @@ CollisionInfo::CollisionInfo() :
         _intData(0),
         _shapeA(NULL),
         _shapeB(NULL),
-        _damping(0.f),
-        _elasticity(1.f),
-        _contactPoint(0.f), 
-        _penetration(0.f), 
-        _addedVelocity(0.f) {
+        _damping(0.0f),
+        _elasticity(1.0f),
+        _contactPoint(0.0f), 
+        _penetration(0.0f), 
+        _addedVelocity(0.0f) {
+}
+
+quint64 CollisionInfo::getShapePairKey() const {
+    if (_shapeB == NULL || _shapeA == NULL) {
+        // zero is an invalid key
+        return 0;
+    }
+    quint32 idA = _shapeA->getID();
+    quint32 idB = _shapeB->getID();
+    return idA < idB ? ((quint64)idA << 32) + (quint64)idB : ((quint64)idB << 32) + (quint64)idA;
 }
 
 CollisionList::CollisionList(int maxSize) :

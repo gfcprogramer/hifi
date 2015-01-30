@@ -18,6 +18,7 @@
 #include <QObject>
 
 #include <PacketHeaders.h>
+#include <RenderArgs.h>
 #include <SharedUtil.h>
 
 #include "Octree.h"
@@ -25,7 +26,6 @@
 #include "ViewFrustum.h"
 
 class OctreeRenderer;
-class RenderArgs;
 
 
 // Generic client side Octree renderer class.
@@ -35,7 +35,6 @@ public:
     OctreeRenderer();
     virtual ~OctreeRenderer();
 
-    virtual Octree* createTree() = 0;
     virtual char getMyNodeType() const = 0;
     virtual PacketType getMyQueryMessageType() const = 0;
     virtual PacketType getExpectedPacketType() const = 0;
@@ -51,10 +50,9 @@ public:
     /// initialize and GPU/rendering related resources
     virtual void init();
 
-    enum RenderMode { DEFAULT_RENDER_MODE, SHADOW_RENDER_MODE, DIFFUSE_RENDER_MODE, NORMAL_RENDER_MODE };
-
     /// render the content of the octree
-    virtual void render(RenderMode renderMode = DEFAULT_RENDER_MODE);
+    virtual void render(RenderArgs::RenderMode renderMode = RenderArgs::DEFAULT_RENDER_MODE, 
+                                RenderArgs::RenderSide renderSide = RenderArgs::MONO);
 
     ViewFrustum* getViewFrustum() const { return _viewFrustum; }
     void setViewFrustum(ViewFrustum* viewFrustum) { _viewFrustum = viewFrustum; }
@@ -63,24 +61,47 @@ public:
 
     /// clears the tree
     virtual void clear();
+    
+    int getElementsTouched() const { return _elementsTouched; }
+    int getItemsRendered() const { return _itemsRendered; }
+    int getItemsOutOfView() const { return _itemsOutOfView; }
+    int getItemsTooSmall() const { return _itemsTooSmall; }
+
+    int getMeshesConsidered() const { return _meshesConsidered; }
+    int getMeshesRendered() const { return _meshesRendered; }
+    int getMeshesOutOfView() const { return _meshesOutOfView; }
+    int getMeshesTooSmall() const { return _meshesTooSmall; }
+
+    int getMaterialSwitches() const { return _materialSwitches; }
+    int getTrianglesRendered() const { return _trianglesRendered; }
+    int getQuadsRendered() const { return _quadsRendered; }
+
+    int getTranslucentMeshPartsRendered() const { return _translucentMeshPartsRendered; }
+    int getOpaqueMeshPartsRendered() const { return _opaqueMeshPartsRendered; }
+
 protected:
+    virtual Octree* createTree() = 0;
+
     Octree* _tree;
     bool _managedTree;
     ViewFrustum* _viewFrustum;
-};
-
-class RenderArgs {
-public:
-    OctreeRenderer* _renderer;
-    ViewFrustum* _viewFrustum;
-    float _sizeScale;
-    int _boundaryLevelAdjust;
-    OctreeRenderer::RenderMode _renderMode;
 
     int _elementsTouched;
     int _itemsRendered;
     int _itemsOutOfView;
-};
+    int _itemsTooSmall;
 
+    int _meshesConsidered;
+    int _meshesRendered;
+    int _meshesOutOfView;
+    int _meshesTooSmall;
+
+    int _materialSwitches;
+    int _trianglesRendered;
+    int _quadsRendered;
+
+    int _translucentMeshPartsRendered;
+    int _opaqueMeshPartsRendered;
+};
 
 #endif // hifi_OctreeRenderer_h

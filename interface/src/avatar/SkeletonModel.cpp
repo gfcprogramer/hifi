@@ -20,17 +20,55 @@
 #include "Hand.h"
 #include "Menu.h"
 #include "SkeletonModel.h"
+#include "SkeletonRagdoll.h"
+#include "Util.h"
+
+enum StandingFootState {
+    LEFT_FOOT,
+    RIGHT_FOOT,
+    NO_FOOT
+};
 
 SkeletonModel::SkeletonModel(Avatar* owningAvatar, QObject* parent) : 
     Model(parent),
-    Ragdoll(),
+    _triangleFanID(DependencyManager::get<GeometryCache>()->allocateID()),
     _owningAvatar(owningAvatar),
     _boundingShape(),
-    _boundingShapeLocalOffset(0.0f) {
+    _boundingShapeLocalOffset(0.0f),
+    _ragdoll(NULL),
+    _defaultEyeModelPosition(glm::vec3(0.0f, 0.0f, 0.0f)),
+    _standingFoot(NO_FOOT),
+    _standingOffset(0.0f),
+    _clampedFootPosition(0.0f)
+{
+}
+
+SkeletonModel::~SkeletonModel() {
+    delete _ragdoll;
+    _ragdoll = NULL;
 }
 
 void SkeletonModel::setJointStates(QVector<JointState> states) {
     Model::setJointStates(states);
+
+    // Determine the default eye position for avatar scale = 1.0
+    int headJointIndex = _geometry->getFBXGeometry().headJointIndex;
+    if (0 <= headJointIndex && headJointIndex < _jointStates.size()) {
+
+        glm::vec3 leftEyePosition, rightEyePosition;
+        getEyeModelPositions(leftEyePosition, rightEyePosition);
+        glm::vec3 midEyePosition = (leftEyePosition + rightEyePosition) / 2.0f;
+
+        int rootJointIndex = _geometry->getFBXGeometry().rootJointIndex;
+        glm::vec3 rootModelPosition;
+        getJointPosition(rootJointIndex, rootModelPosition);
+
+        _defaultEyeModelPosition = midEyePosition - rootModelPosition;
+        _defaultEyeModelPosition.z = -_defaultEyeModelPosition.z;
+
+        // Skeleton may have already been scaled so unscale it
+        _defaultEyeModelPosition = _defaultEyeModelPosition / _scale;
+    }
 
     // the SkeletonModel override of updateJointState() will clear the translation part
     // of its root joint and we need that done before we try to build shapes hence we
@@ -45,18 +83,26 @@ void SkeletonModel::setJointStates(QVector<JointState> states) {
     }
 }
 
-const float PALM_PRIORITY = 3.0f;
+const float PALM_PRIORITY = DEFAULT_PRIORITY;
+const float LEAN_PRIORITY = DEFAULT_PRIORITY;
 
 void SkeletonModel::simulate(float deltaTime, bool fullUpdate) {
-    setTranslation(_owningAvatar->getPosition());
-    setRotation(_owningAvatar->getOrientation() * glm::angleAxis(PI, glm::vec3(0.0f, 1.0f, 0.0f)));
-    const float MODEL_SCALE = 0.0006f;
-    setScale(glm::vec3(1.0f, 1.0f, 1.0f) * _owningAvatar->getScale() * MODEL_SCALE);
+    setTranslation(_owningAvatar->getSkeletonPosition());
+    static const glm::quat refOrientation = glm::angleAxis(PI, glm::vec3(0.0f, 1.0f, 0.0f));
+    setRotation(_owningAvatar->getOrientation() * refOrientation);
+    setScale(glm::vec3(1.0f, 1.0f, 1.0f) * _owningAvatar->getScale());
+    setBlendshapeCoefficients(_owningAvatar->getHead()->getBlendshapeCoefficients());
     
     Model::simulate(deltaTime, fullUpdate);
     
-    if (!(isActive() && _owningAvatar->isMyAvatar())) {
+    if (!isActive() || !_owningAvatar->isMyAvatar()) {
         return; // only simulate for own avatar
+    }
+    
+    MyAvatar* myAvatar = static_cast<MyAvatar*>(_owningAvatar);
+    if (myAvatar->isPlaying()) {
+        // Don't take inputs if playing back a recording.
+        return;
     }
 
     const FBXGeometry& geometry = _geometry->getFBXGeometry();
@@ -151,9 +197,6 @@ void SkeletonModel::getBodyShapes(QVector<const Shape*>& shapes) const {
 void SkeletonModel::renderIKConstraints() {
     renderJointConstraints(getRightHandJointIndex());
     renderJointConstraints(getLeftHandJointIndex());
-    //if (isActive() && _owningAvatar->isMyAvatar()) {
-    //    renderRagdoll();
-    //}
 }
 
 class IndexValue {
@@ -220,7 +263,7 @@ void SkeletonModel::applyPalmData(int jointIndex, PalmData& palm) {
         JointState& parentState = _jointStates[parentJointIndex];
         parentState.setRotationInBindFrame(palmRotation, PALM_PRIORITY);
         // lock hand to forearm by slamming its rotation (in parent-frame) to identity
-        _jointStates[jointIndex].setRotationInConstrainedFrame(glm::quat());
+        _jointStates[jointIndex].setRotationInConstrainedFrame(glm::quat(), PALM_PRIORITY);
     } else {
         inverseKinematics(jointIndex, palmPosition, palmRotation, PALM_PRIORITY);
     }
@@ -233,7 +276,7 @@ void SkeletonModel::updateJointState(int index) {
         const JointState& parentState = _jointStates.at(joint.parentIndex);
         const FBXGeometry& geometry = _geometry->getFBXGeometry();
         if (index == geometry.leanJointIndex) {
-            maybeUpdateLeanRotation(parentState, joint, state);
+            maybeUpdateLeanRotation(parentState, state);
         
         } else if (index == geometry.neckJointIndex) {
             maybeUpdateNeckRotation(parentState, joint, state);    
@@ -250,17 +293,20 @@ void SkeletonModel::updateJointState(int index) {
     }
 }
 
-void SkeletonModel::maybeUpdateLeanRotation(const JointState& parentState, const FBXJoint& joint, JointState& state) {
+void SkeletonModel::maybeUpdateLeanRotation(const JointState& parentState, JointState& state) {
     if (!_owningAvatar->isMyAvatar() || Application::getInstance()->getPrioVR()->isActive()) {
         return;
     }
     // get the rotation axes in joint space and use them to adjust the rotation
-    glm::mat3 axes = glm::mat3_cast(glm::quat());
-    glm::mat3 inverse = glm::mat3(glm::inverse(parentState.getTransform() * glm::translate(state.getDefaultTranslationInConstrainedFrame()) *
-        joint.preTransform * glm::mat4_cast(joint.preRotation * joint.rotation)));
-    state.setRotationInConstrainedFrame(glm::angleAxis(- RADIANS_PER_DEGREE * _owningAvatar->getHead()->getFinalLeanSideways(), 
-        glm::normalize(inverse * axes[2])) * glm::angleAxis(- RADIANS_PER_DEGREE * _owningAvatar->getHead()->getFinalLeanForward(), 
-        glm::normalize(inverse * axes[0])) * joint.rotation);
+    glm::vec3 xAxis(1.0f, 0.0f, 0.0f);
+    glm::vec3 yAxis(0.0f, 1.0f, 0.0f);
+    glm::vec3 zAxis(0.0f, 0.0f, 1.0f);
+    glm::quat inverse = glm::inverse(parentState.getRotation() * state.getDefaultRotationInParentFrame());
+    state.setRotationInConstrainedFrame(
+              glm::angleAxis(- RADIANS_PER_DEGREE * _owningAvatar->getHead()->getFinalLeanSideways(), inverse * zAxis) 
+            * glm::angleAxis(- RADIANS_PER_DEGREE * _owningAvatar->getHead()->getFinalLeanForward(), inverse * xAxis)
+            * glm::angleAxis(RADIANS_PER_DEGREE * _owningAvatar->getHead()->getTorsoTwist(), inverse * yAxis)
+            * state.getFBXJoint().rotation, LEAN_PRIORITY);
 }
 
 void SkeletonModel::maybeUpdateNeckRotation(const JointState& parentState, const FBXJoint& joint, JointState& state) {
@@ -268,7 +314,7 @@ void SkeletonModel::maybeUpdateNeckRotation(const JointState& parentState, const
 }
 
 void SkeletonModel::maybeUpdateEyeRotation(const JointState& parentState, const FBXJoint& joint, JointState& state) {
-    _owningAvatar->getHead()->getFaceModel().maybeUpdateEyeRotation(parentState, joint, state);
+    _owningAvatar->getHead()->getFaceModel().maybeUpdateEyeRotation(this, parentState, joint, state);
 }
 
 void SkeletonModel::renderJointConstraints(int jointIndex) {
@@ -276,7 +322,7 @@ void SkeletonModel::renderJointConstraints(int jointIndex) {
         return;
     }
     const FBXGeometry& geometry = _geometry->getFBXGeometry();
-    const float BASE_DIRECTION_SIZE = 300.0f;
+    const float BASE_DIRECTION_SIZE = 0.3f;
     float directionSize = BASE_DIRECTION_SIZE * extractUniformScale(_scale);
     glLineWidth(3.0f);
     do {
@@ -292,6 +338,9 @@ void SkeletonModel::renderJointConstraints(int jointIndex) {
         float fanScale = directionSize * 0.75f;
         glScalef(fanScale, fanScale, fanScale);
         const int AXIS_COUNT = 3;
+
+        auto geometryCache = DependencyManager::get<GeometryCache>();
+
         for (int i = 0; i < AXIS_COUNT; i++) {
             if (joint.rotationMin[i] <= -PI + EPSILON && joint.rotationMax[i] >= PI - EPSILON) {
                 continue; // unconstrained
@@ -305,27 +354,59 @@ void SkeletonModel::renderJointConstraints(int jointIndex) {
             } else {
                 otherAxis.x = 1.0f;
             }
-            glColor4f(otherAxis.r, otherAxis.g, otherAxis.b, 0.75f);
-        
-            glBegin(GL_TRIANGLE_FAN);
-            glVertex3f(0.0f, 0.0f, 0.0f);
+            glm::vec4 color(otherAxis.r, otherAxis.g, otherAxis.b, 0.75f);
+
+            QVector<glm::vec3> points;
+            points << glm::vec3(0.0f, 0.0f, 0.0f);
             const int FAN_SEGMENTS = 16;
             for (int j = 0; j < FAN_SEGMENTS; j++) {
                 glm::vec3 rotated = glm::angleAxis(glm::mix(joint.rotationMin[i], joint.rotationMax[i],
                     (float)j / (FAN_SEGMENTS - 1)), axis) * otherAxis;
-                glVertex3f(rotated.x, rotated.y, rotated.z);
+                points << rotated;
             }
-            glEnd();
+            // TODO: this is really inefficient constantly recreating these vertices buffers. It would be
+            // better if the skeleton model cached these buffers for each of the joints they are rendering
+            geometryCache->updateVertices(_triangleFanID, points, color);
+            geometryCache->renderVertices(gpu::TRIANGLE_FAN, _triangleFanID);
+            
         }
         glPopMatrix();
         
-        renderOrientationDirections(position, _rotation * jointState.getRotation(), directionSize);
+        renderOrientationDirections(jointIndex, position, _rotation * jointState.getRotation(), directionSize);
         jointIndex = joint.parentIndex;
         
     } while (jointIndex != -1 && geometry.joints.at(jointIndex).isFree);
     
     glLineWidth(1.0f);
 }
+
+void SkeletonModel::renderOrientationDirections(int jointIndex, glm::vec3 position, const glm::quat& orientation, float size) {
+    auto geometryCache = DependencyManager::get<GeometryCache>();
+
+    if (!_jointOrientationLines.contains(jointIndex)) {
+        OrientationLineIDs jointLineIDs;
+        jointLineIDs._up = geometryCache->allocateID();
+        jointLineIDs._front = geometryCache->allocateID();
+        jointLineIDs._right = geometryCache->allocateID();
+        _jointOrientationLines[jointIndex] = jointLineIDs;
+    }
+    OrientationLineIDs& jointLineIDs = _jointOrientationLines[jointIndex];
+
+    glm::vec3 pRight	= position + orientation * IDENTITY_RIGHT * size;
+    glm::vec3 pUp		= position + orientation * IDENTITY_UP    * size;
+    glm::vec3 pFront	= position + orientation * IDENTITY_FRONT * size;
+
+    glm::vec3 red(1.0f, 0.0f, 0.0f);
+    geometryCache->renderLine(position, pRight, red, jointLineIDs._right);
+
+    glm::vec3 green(0.0f, 1.0f, 0.0f);
+    geometryCache->renderLine(position, pUp, green, jointLineIDs._up);
+
+    glm::vec3 blue(0.0f, 0.0f, 1.0f);
+    geometryCache->renderLine(position, pFront, blue, jointLineIDs._front);
+}
+
+
 
 void SkeletonModel::setHandPosition(int jointIndex, const glm::vec3& position, const glm::quat& rotation) {
     // this algorithm is from sample code from sixense
@@ -428,6 +509,10 @@ bool SkeletonModel::getHeadPosition(glm::vec3& headPosition) const {
 }
 
 bool SkeletonModel::getNeckPosition(glm::vec3& neckPosition) const {
+    if (_owningAvatar->isMyAvatar() &&
+            Menu::getInstance()->isOptionChecked(MenuOption::CollideAsRagdoll)) {
+        return isActive() && getVisibleJointPositionInWorldFrame(_geometry->getFBXGeometry().neckJointIndex, neckPosition);
+    }
     return isActive() && getJointPositionInWorldFrame(_geometry->getFBXGeometry().neckJointIndex, neckPosition);
 }
 
@@ -441,30 +526,35 @@ bool SkeletonModel::getNeckParentRotationFromDefaultOrientation(glm::quat& neckP
     }
     int parentIndex = geometry.joints.at(geometry.neckJointIndex).parentIndex;
     glm::quat worldFrameRotation;
-    if (getJointRotationInWorldFrame(parentIndex, worldFrameRotation)) {
-        neckParentRotation = worldFrameRotation * _jointStates[parentIndex].getFBXJoint().inverseDefaultRotation;
-        return true;
+    bool success = false;
+    if (Menu::getInstance()->isOptionChecked(MenuOption::CollideAsRagdoll)) {
+        success = getVisibleJointRotationInWorldFrame(parentIndex, worldFrameRotation);
+    } else {
+        success = getJointRotationInWorldFrame(parentIndex, worldFrameRotation);
     }
-    return false;
+    if (success) {
+        neckParentRotation = worldFrameRotation * _jointStates[parentIndex].getFBXJoint().inverseDefaultRotation;
+    }
+    return success;
 }
 
-bool SkeletonModel::getEyePositions(glm::vec3& firstEyePosition, glm::vec3& secondEyePosition) const {
+bool SkeletonModel::getEyeModelPositions(glm::vec3& firstEyePosition, glm::vec3& secondEyePosition) const {
     if (!isActive()) {
         return false;
-    }
+        }
     const FBXGeometry& geometry = _geometry->getFBXGeometry();
-    if (getJointPositionInWorldFrame(geometry.leftEyeJointIndex, firstEyePosition) &&
-            getJointPositionInWorldFrame(geometry.rightEyeJointIndex, secondEyePosition)) {
+    if (getJointPosition(geometry.leftEyeJointIndex, firstEyePosition) &&
+        getJointPosition(geometry.rightEyeJointIndex, secondEyePosition)) {
         return true;
     }
     // no eye joints; try to estimate based on head/neck joints
     glm::vec3 neckPosition, headPosition;
-    if (getJointPositionInWorldFrame(geometry.neckJointIndex, neckPosition) &&
-            getJointPositionInWorldFrame(geometry.headJointIndex, headPosition)) {
+    if (getJointPosition(geometry.neckJointIndex, neckPosition) &&
+        getJointPosition(geometry.headJointIndex, headPosition)) {
         const float EYE_PROPORTION = 0.6f;
         glm::vec3 baseEyePosition = glm::mix(neckPosition, headPosition, EYE_PROPORTION);
         glm::quat headRotation;
-        getJointRotationInWorldFrame(geometry.headJointIndex, headRotation);
+        getJointRotation(geometry.headJointIndex, headRotation);
         const float EYES_FORWARD = 0.25f;
         const float EYE_SEPARATION = 0.1f;
         float headHeight = glm::distance(neckPosition, headPosition);
@@ -475,26 +565,44 @@ bool SkeletonModel::getEyePositions(glm::vec3& firstEyePosition, glm::vec3& seco
     return false;
 }
 
+bool SkeletonModel::getEyePositions(glm::vec3& firstEyePosition, glm::vec3& secondEyePosition) const {
+    if (getEyeModelPositions(firstEyePosition, secondEyePosition)) {
+        firstEyePosition = _translation + _rotation * firstEyePosition;
+        secondEyePosition = _translation + _rotation * secondEyePosition;
+        return true;
+    }
+    return false;
+}
+
+glm::vec3 SkeletonModel::getDefaultEyeModelPosition() const {
+    return _owningAvatar->getScale() * _defaultEyeModelPosition;
+}
+
 void SkeletonModel::renderRagdoll() {
+    if (!_ragdoll) {
+        return;
+    }
+    const QVector<VerletPoint>& points = _ragdoll->getPoints();
     const int BALL_SUBDIVISIONS = 6;
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_LIGHTING);
     glPushMatrix();
 
     Application::getInstance()->loadTranslatedViewMatrix(_translation);
-    int numPoints = _ragdollPoints.size();
+    int numPoints = points.size();
     float alpha = 0.3f;
     float radius1 = 0.008f;
     float radius2 = 0.01f;
+    glm::vec3 simulationTranslation = _ragdoll->getTranslationInSimulationFrame();
+    auto geometryCache = DependencyManager::get<GeometryCache>();
     for (int i = 0; i < numPoints; ++i) {
         glPushMatrix();
-        // draw each point as a yellow hexagon with black border
-        glm::vec3 position = _rotation * _ragdollPoints[i]._position;
+        // NOTE: ragdollPoints are in simulation-frame but we want them to be model-relative
+        glm::vec3 position = points[i]._position - simulationTranslation;
         glTranslatef(position.x, position.y, position.z);
-        glColor4f(0.0f, 0.0f, 0.0f, alpha);
-        glutSolidSphere(radius2, BALL_SUBDIVISIONS, BALL_SUBDIVISIONS);
-        glColor4f(1.0f, 1.0f, 0.0f, alpha);
-        glutSolidSphere(radius1, BALL_SUBDIVISIONS, BALL_SUBDIVISIONS);
+        // draw each point as a yellow hexagon with black border
+        geometryCache->renderSphere(radius2, BALL_SUBDIVISIONS, BALL_SUBDIVISIONS, glm::vec4(0.0f, 0.0f, 0.0f, alpha));
+        geometryCache->renderSphere(radius1, BALL_SUBDIVISIONS, BALL_SUBDIVISIONS, glm::vec4(1.0f, 1.0f, 0.0f, alpha));
         glPopMatrix();
     }
     glPopMatrix();
@@ -502,68 +610,18 @@ void SkeletonModel::renderRagdoll() {
     glEnable(GL_LIGHTING);
 }
 
-// virtual
-void SkeletonModel::initRagdollPoints() {
-    clearRagdollConstraintsAndPoints();
-
-    // one point for each joint
-    int numJoints = _jointStates.size();
-    _ragdollPoints.fill(VerletPoint(), numJoints);
-    for (int i = 0; i < numJoints; ++i) {
-        const JointState& state = _jointStates.at(i);
-        glm::vec3 position = state.getPosition();
-        _ragdollPoints[i]._position = position;
-        _ragdollPoints[i]._lastPosition = position;
-    }
-}
-
-void SkeletonModel::buildRagdollConstraints() {
-    // NOTE: the length of DistanceConstraints is computed and locked in at this time
-    // so make sure the ragdoll positions are in a normal configuration before here.
-    const int numPoints = _ragdollPoints.size();
-    assert(numPoints == _jointStates.size());
-
-    QMultiMap<int, int> families;
-    for (int i = 0; i < numPoints; ++i) {
-        const JointState& state = _jointStates.at(i);
-        const FBXJoint& joint = state.getFBXJoint();
-        int parentIndex = joint.parentIndex;
-        if (parentIndex == -1) {
-            FixedConstraint* anchor = new FixedConstraint(&(_ragdollPoints[i]), glm::vec3(0.0f));
-            _ragdollConstraints.push_back(anchor);
-        } else { 
-            DistanceConstraint* bone = new DistanceConstraint(&(_ragdollPoints[i]), &(_ragdollPoints[parentIndex]));
-            bone->setDistance(state.getDistanceToParent());
-            _ragdollConstraints.push_back(bone);
-            families.insert(parentIndex, i);
-        }
-    }
-    // Joints that have multiple children effectively have rigid constraints between the children
-    // in the parent frame, so we add constraints between children in the same family.
-    QMultiMap<int, int>::iterator itr = families.begin();
-    while (itr != families.end()) {
-        QList<int> children = families.values(itr.key());
-        if (children.size() > 1) {
-            for (int i = 1; i < children.size(); ++i) {
-                DistanceConstraint* bone = new DistanceConstraint(&(_ragdollPoints[children[i-1]]), &(_ragdollPoints[children[i]]));
-                _ragdollConstraints.push_back(bone);
-            }
-        }
-        ++itr;
-    }
-    
-}
-
 void SkeletonModel::updateVisibleJointStates() {
-    if (_showTrueJointTransforms) {
+    if (_showTrueJointTransforms || !_ragdoll) {
         // no need to update visible transforms
         return;
     }
+    const QVector<VerletPoint>& ragdollPoints = _ragdoll->getPoints();
     QVector<glm::vec3> points;
     points.reserve(_jointStates.size());
+    glm::quat invRotation = glm::inverse(_rotation);
     for (int i = 0; i < _jointStates.size(); i++) {
         JointState& state = _jointStates[i];
-        points.push_back(_ragdollPoints[i]._position);
+        points.push_back(ragdollPoints[i]._position);
 
         // get the parent state (this is the state that we want to rotate)
         int parentIndex = state.getParentIndex();
@@ -585,8 +643,9 @@ void SkeletonModel::updateVisibleJointStates() {
 
         // we're looking for the rotation that moves visible bone parallel to ragdoll bone
         // rotationBetween(jointTip - jointPivot, shapeTip - shapePivot)
+        // NOTE: points are in simulation-frame so rotate line segment into model-frame
         glm::quat delta = rotationBetween(state.getVisiblePosition() - extractTranslation(parentTransform), 
-                points[i] - points[parentIndex]);
+                invRotation * (points[i] - points[parentIndex]));
 
         // apply
         parentState.mixVisibleRotationDelta(delta, 0.01f);
@@ -596,9 +655,74 @@ void SkeletonModel::updateVisibleJointStates() {
     }
 }
 
-// virtual 
-void SkeletonModel::stepRagdollForward(float deltaTime) {
-    moveShapesTowardJoints(deltaTime);
+/// \return offset of hips after foot animation
+void SkeletonModel::updateStandingFoot() {
+    if (_geometry == NULL) {
+        return;
+    }
+    glm::vec3 offset(0.0f);
+    int leftFootIndex = _geometry->getFBXGeometry().leftToeJointIndex;
+    int rightFootIndex = _geometry->getFBXGeometry().rightToeJointIndex;
+
+    if (leftFootIndex != -1 && rightFootIndex != -1) {
+        glm::vec3 leftPosition, rightPosition;
+        getJointPosition(leftFootIndex, leftPosition);
+        getJointPosition(rightFootIndex, rightPosition);
+
+        int lowestFoot = (leftPosition.y < rightPosition.y) ? LEFT_FOOT : RIGHT_FOOT;
+        const float MIN_STEP_HEIGHT_THRESHOLD = 0.05f;
+        bool oneFoot = fabsf(leftPosition.y - rightPosition.y) > MIN_STEP_HEIGHT_THRESHOLD;
+        int currentFoot = oneFoot ? lowestFoot : _standingFoot;
+
+        if (_standingFoot == NO_FOOT) {
+            currentFoot = lowestFoot;
+        }
+        if (currentFoot != _standingFoot) {
+            if (_standingFoot == NO_FOOT) {
+                // pick the lowest foot
+                glm::vec3 lowestPosition = (currentFoot == LEFT_FOOT) ? leftPosition : rightPosition;
+                // we ignore zero length positions which can happen for a few frames until skeleton is fully loaded
+                if (glm::length(lowestPosition) > 0.0f) {
+                    _standingFoot = currentFoot;
+                    _clampedFootPosition = lowestPosition;
+                }
+            } else {
+                // swap feet
+                _standingFoot = currentFoot;
+                glm::vec3 nextPosition = leftPosition;
+                glm::vec3 prevPosition = rightPosition;
+                if (_standingFoot == RIGHT_FOOT) {
+                    nextPosition = rightPosition;
+                    prevPosition = leftPosition;
+                }
+                glm::vec3 oldOffset = _clampedFootPosition - prevPosition;
+                _clampedFootPosition = oldOffset + nextPosition;
+                offset = _clampedFootPosition - nextPosition;
+            }
+        } else {
+            glm::vec3 nextPosition = (_standingFoot == LEFT_FOOT) ? leftPosition : rightPosition;
+            offset = _clampedFootPosition - nextPosition;
+        }
+
+        // clamp the offset to not exceed some max distance
+        const float MAX_STEP_OFFSET = 1.0f;
+        float stepDistance = glm::length(offset);
+        if (stepDistance > MAX_STEP_OFFSET) {
+            offset *= (MAX_STEP_OFFSET / stepDistance);
+        }
+    }
+    _standingOffset = offset;
+}
+
+SkeletonRagdoll* SkeletonModel::buildRagdoll() {
+    if (!_ragdoll) {
+        _ragdoll = new SkeletonRagdoll(this);
+        if (_enableShapes) {
+            clearShapes();
+            buildShapes();
+        }
+    }
+    return _ragdoll;
 }
 
 float DENSITY_OF_WATER = 1000.0f; // kg/m^3
@@ -616,41 +740,56 @@ void SkeletonModel::buildShapes() {
         return;
     }
 
-    initRagdollPoints();
+    if (!_ragdoll) {
+        _ragdoll = new SkeletonRagdoll(this);
+    }
+    _ragdoll->setRootIndex(geometry.rootJointIndex);
+    _ragdoll->initPoints();
+    QVector<VerletPoint>& points = _ragdoll->getPoints();
+
+    float massScale = _ragdoll->getMassScale();
 
     float uniformScale = extractUniformScale(_scale);
     const int numStates = _jointStates.size();
+    float totalMass = 0.0f;
     for (int i = 0; i < numStates; i++) {
         JointState& state = _jointStates[i];
         const FBXJoint& joint = state.getFBXJoint();
         float radius = uniformScale * joint.boneRadius;
         float halfHeight = 0.5f * uniformScale * joint.distanceToParent;
         Shape::Type type = joint.shapeType;
-        if (i == 0 || (type == Shape::CAPSULE_SHAPE && halfHeight < EPSILON)) {
+        int parentIndex = joint.parentIndex;
+        if (parentIndex == -1 || radius < EPSILON) {
+            type = SHAPE_TYPE_UNKNOWN;
+        } else if (type == SHAPE_TYPE_CAPSULE && halfHeight < EPSILON) {
             // this shape is forced to be a sphere
-            type = Shape::SPHERE_SHAPE;
+            type = SHAPE_TYPE_SPHERE;
         }
         Shape* shape = NULL;
-        int parentIndex = joint.parentIndex;
-        if (type == Shape::SPHERE_SHAPE) {
-            shape = new VerletSphereShape(radius, &(_ragdollPoints[i]));
+        if (type == SHAPE_TYPE_SPHERE) {
+            shape = new VerletSphereShape(radius, &(points[i]));
             shape->setEntity(this);
-            _ragdollPoints[i]._mass = glm::max(MIN_JOINT_MASS, DENSITY_OF_WATER * shape->getVolume());
-        } else if (type == Shape::CAPSULE_SHAPE) {
+            float mass = massScale * glm::max(MIN_JOINT_MASS, DENSITY_OF_WATER * shape->getVolume());
+            points[i].setMass(mass);
+            totalMass += mass;
+        } else if (type == SHAPE_TYPE_CAPSULE) {
             assert(parentIndex != -1);
-            shape = new VerletCapsuleShape(radius, &(_ragdollPoints[parentIndex]), &(_ragdollPoints[i]));
+            shape = new VerletCapsuleShape(radius, &(points[parentIndex]), &(points[i]));
             shape->setEntity(this);
-            _ragdollPoints[i]._mass = glm::max(MIN_JOINT_MASS, DENSITY_OF_WATER * shape->getVolume());
+            float mass = massScale * glm::max(MIN_JOINT_MASS, DENSITY_OF_WATER * shape->getVolume());
+            points[i].setMass(mass);
+            totalMass += mass;
         } 
-        if (parentIndex != -1) {
+        if (shape && parentIndex != -1) {
             // always disable collisions between joint and its parent
             disableCollisions(i, parentIndex);
-        } else {
-            // give the base joint a very large mass since it doesn't actually move
-            // in the local-frame simulation (it defines the origin)
-            _ragdollPoints[i]._mass = VERY_BIG_MASS;
-        }
+        } 
         _shapes.push_back(shape);
+    }
+
+    // set the mass of the root
+    if (numStates > 0) {
+        points[_ragdoll->getRootIndex()].setMass(totalMass);
     }
 
     // This method moves the shapes to their default positions in Model frame.
@@ -660,23 +799,21 @@ void SkeletonModel::buildShapes() {
     // joints that are currently colliding.
     disableCurrentSelfCollisions();
 
-    buildRagdollConstraints();
+    _ragdoll->buildConstraints();
 
     // ... then move shapes back to current joint positions
-    if (_ragdollPoints.size() == numStates) {
-        int numJoints = _jointStates.size();
-        for (int i = 0; i < numJoints; ++i) {
-            _ragdollPoints[i]._lastPosition = _ragdollPoints.at(i)._position;
-            _ragdollPoints[i]._position = _jointStates.at(i).getPosition();
-        }
-    }
-    enforceRagdollConstraints();
+    _ragdoll->slamPointPositions();
+    _ragdoll->enforceConstraints();
 }
 
 void SkeletonModel::moveShapesTowardJoints(float deltaTime) {
+    // KEEP: although we don't currently use this method we may eventually need it to help
+    // unravel a skelton that has become tangled in its constraints.  So let's keep this
+    // around for a while just in case.
     const int numStates = _jointStates.size();
-    assert(_jointStates.size() == _ragdollPoints.size());
-    if (_ragdollPoints.size() != numStates) {
+    QVector<VerletPoint>& ragdollPoints = _ragdoll->getPoints();
+    assert(_jointStates.size() == ragdollPoints.size());
+    if (ragdollPoints.size() != numStates) {
         return;
     }
 
@@ -684,62 +821,32 @@ void SkeletonModel::moveShapesTowardJoints(float deltaTime) {
     const float RAGDOLL_FOLLOWS_JOINTS_TIMESCALE = 0.05f;
     float fraction = glm::clamp(deltaTime / RAGDOLL_FOLLOWS_JOINTS_TIMESCALE, 0.0f, 1.0f);
 
-    // SIMPLE LINEAR SLAVING -- KEEP this implementation for reference
-    //float oneMinusFraction = 1.0f - fraction; 
-    //for (int i = 0; i < numStates; ++i) {
-    //    _ragdollPoints[i]._lastPosition = _ragdollPoints[i]._position;
-    //    _ragdollPoints[i]._position = oneMinusFraction * _ragdollPoints[i]._position + fraction * _jointStates.at(i).getPosition();
-    //}
-    // SIMPLE LINEAR SLAVING -- KEEP
-
-    // parent-relative linear slaving
+    float oneMinusFraction = 1.0f - fraction; 
+    glm::vec3 simulationTranslation = _ragdoll->getTranslationInSimulationFrame();
     for (int i = 0; i < numStates; ++i) {
-        JointState& state = _jointStates[i];
-        _ragdollPoints[i]._lastPosition = _ragdollPoints.at(i)._position;
-
-        int p = state.getParentIndex();
-        if (p == -1) {
-            _ragdollPoints[i]._position = glm::vec3(0.0f);
-            continue;
-        }
-        if (state.getDistanceToParent() < EPSILON) {
-            _ragdollPoints[i]._position = _ragdollPoints.at(p)._position;
-            continue;
-        }
-
-        glm::vec3 bone = _ragdollPoints.at(i)._lastPosition - _ragdollPoints.at(p)._lastPosition;
-        const JointState& parentState = _jointStates.at(p);
-        glm::vec3 targetBone = state.getPosition() - parentState.getPosition();
-
-        glm::vec3 newBone = (1.0f - fraction) * bone + fraction * targetBone;
-        float boneLength = glm::length(newBone);
-        if (boneLength > EPSILON) {
-            // slam newBone's length to that of the joint helps maintain distance constraints
-            newBone *= state.getDistanceToParent() / boneLength;
-        }
-        // set the new position relative to parent's new position
-        _ragdollPoints[i]._position = _ragdollPoints.at(p)._position + newBone;
+        // ragdollPoints are in simulation-frame but jointStates are in model-frame
+        ragdollPoints[i].initPosition(oneMinusFraction * ragdollPoints[i]._position + 
+                fraction * (simulationTranslation + _rotation * (_jointStates.at(i).getPosition())));
     }
 }
 
 void SkeletonModel::computeBoundingShape(const FBXGeometry& geometry) {
     // compute default joint transforms
-    int numJoints = geometry.joints.size();
-    if (numJoints != _ragdollPoints.size()) {
-        return;
-    }
+    int numStates = _jointStates.size();
     QVector<glm::mat4> transforms;
-    transforms.fill(glm::mat4(), numJoints);
+    transforms.fill(glm::mat4(), numStates);
+
+    QVector<VerletPoint>& ragdollPoints = _ragdoll->getPoints();
 
     // compute the default transforms and slam the ragdoll positions accordingly
     // (which puts the shapes where we want them)
-    for (int i = 0; i < numJoints; i++) {
-        const FBXJoint& joint = geometry.joints.at(i);
+    for (int i = 0; i < numStates; i++) {
+        JointState& state = _jointStates[i];
+        const FBXJoint& joint = state.getFBXJoint();
         int parentIndex = joint.parentIndex;
         if (parentIndex == -1) {
             transforms[i] = _jointStates[i].getTransform();
-            _ragdollPoints[i]._position = extractTranslation(transforms[i]);
-            _ragdollPoints[i]._lastPosition = _ragdollPoints[i]._position;
+            ragdollPoints[i].initPosition(extractTranslation(transforms[i]));
             continue;
         }
         
@@ -747,8 +854,7 @@ void SkeletonModel::computeBoundingShape(const FBXGeometry& geometry) {
         transforms[i] = transforms[parentIndex] * glm::translate(joint.translation) 
             * joint.preTransform * glm::mat4_cast(modifiedRotation) * joint.postTransform;
         // setting the ragdollPoints here slams the VerletShapes into their default positions
-        _ragdollPoints[i]._position = extractTranslation(transforms[i]);
-        _ragdollPoints[i]._lastPosition = _ragdollPoints[i]._position;
+        ragdollPoints[i].initPosition(extractTranslation(transforms[i]));
     }
 
     // compute bounding box that encloses all shapes
@@ -765,7 +871,7 @@ void SkeletonModel::computeBoundingShape(const FBXGeometry& geometry) {
         shapeExtents.reset();
         glm::vec3 localPosition = shape->getTranslation();
         int type = shape->getType();
-        if (type == Shape::CAPSULE_SHAPE) {
+        if (type == CAPSULE_SHAPE) {
             // add the two furthest surface points of the capsule
             CapsuleShape* capsule = static_cast<CapsuleShape*>(shape);
             glm::vec3 axis;
@@ -777,7 +883,7 @@ void SkeletonModel::computeBoundingShape(const FBXGeometry& geometry) {
             shapeExtents.addPoint(localPosition + axis);
             shapeExtents.addPoint(localPosition - axis);
             totalExtents.addExtents(shapeExtents);
-        } else if (type == Shape::SPHERE_SHAPE) {
+        } else if (type == SPHERE_SHAPE) {
             float radius = shape->getBoundingRadius();
             glm::vec3 axis = glm::vec3(radius);
             shapeExtents.addPoint(localPosition + axis);
@@ -793,7 +899,9 @@ void SkeletonModel::computeBoundingShape(const FBXGeometry& geometry) {
     float capsuleRadius = 0.5f * sqrtf(0.5f * (diagonal.x * diagonal.x + diagonal.z * diagonal.z));
     _boundingShape.setRadius(capsuleRadius);
     _boundingShape.setHalfHeight(0.5f * diagonal.y - capsuleRadius);
-    _boundingShapeLocalOffset = 0.5f * (totalExtents.maximum + totalExtents.minimum);
+
+    glm::vec3 rootPosition = _jointStates[geometry.rootJointIndex].getPosition();
+    _boundingShapeLocalOffset = 0.5f * (totalExtents.maximum + totalExtents.minimum) - rootPosition;
     _boundingRadius = 0.5f * glm::length(diagonal);
 }
 
@@ -808,7 +916,7 @@ void SkeletonModel::resetShapePositionsToDefaultPose() {
     }
     
     const FBXGeometry& geometry = _geometry->getFBXGeometry();
-    if (geometry.joints.isEmpty() || _shapes.size() != geometry.joints.size()) {
+    if (geometry.joints.isEmpty()) {
         return;
     }
 
@@ -843,8 +951,8 @@ void SkeletonModel::renderBoundingCollisionShapes(float alpha) {
     _boundingShape.getEndPoint(endPoint);
     endPoint = endPoint - _translation;
     glTranslatef(endPoint.x, endPoint.y, endPoint.z);
-    glColor4f(0.6f, 0.6f, 0.8f, alpha);
-    glutSolidSphere(_boundingShape.getRadius(), BALL_SUBDIVISIONS, BALL_SUBDIVISIONS);
+    auto geometryCache = DependencyManager::get<GeometryCache>();
+    geometryCache->renderSphere(_boundingShape.getRadius(), BALL_SUBDIVISIONS, BALL_SUBDIVISIONS, glm::vec4(0.6f, 0.6f, 0.8f, alpha));
 
     // draw a yellow sphere at the capsule startpoint
     glm::vec3 startPoint;
@@ -852,14 +960,64 @@ void SkeletonModel::renderBoundingCollisionShapes(float alpha) {
     startPoint = startPoint - _translation;
     glm::vec3 axis = endPoint - startPoint;
     glTranslatef(-axis.x, -axis.y, -axis.z);
-    glColor4f(0.8f, 0.8f, 0.6f, alpha);
-    glutSolidSphere(_boundingShape.getRadius(), BALL_SUBDIVISIONS, BALL_SUBDIVISIONS);
+    geometryCache->renderSphere(_boundingShape.getRadius(), BALL_SUBDIVISIONS, BALL_SUBDIVISIONS, glm::vec4(0.8f, 0.8f, 0.6f, alpha));
 
     // draw a green cylinder between the two points
     glm::vec3 origin(0.0f);
-    glColor4f(0.6f, 0.8f, 0.6f, alpha);
-    Avatar::renderJointConnectingCone( origin, axis, _boundingShape.getRadius(), _boundingShape.getRadius());
+    Avatar::renderJointConnectingCone( origin, axis, _boundingShape.getRadius(), _boundingShape.getRadius(), glm::vec4(0.6f, 0.8f, 0.6f, alpha));
 
+    glPopMatrix();
+}
+
+const int BALL_SUBDIVISIONS = 10;
+
+// virtual
+void SkeletonModel::renderJointCollisionShapes(float alpha) { 
+    if (!_ragdoll) {
+        return;
+    }
+    glPushMatrix();
+    Application::getInstance()->loadTranslatedViewMatrix(_translation);
+    glm::vec3 simulationTranslation = _ragdoll->getTranslationInSimulationFrame();
+    for (int i = 0; i < _shapes.size(); i++) { 
+        Shape* shape = _shapes[i];
+        if (!shape) { 
+            continue;
+        } 
+
+        auto geometryCache = DependencyManager::get<GeometryCache>();
+
+        glPushMatrix();
+        // shapes are stored in simulation-frame but we want position to be model-relative
+        if (shape->getType() == SPHERE_SHAPE) { 
+            glm::vec3 position = shape->getTranslation() - simulationTranslation;
+            glTranslatef(position.x, position.y, position.z);
+            // draw a grey sphere at shape position
+            geometryCache->renderSphere(shape->getBoundingRadius(), BALL_SUBDIVISIONS, BALL_SUBDIVISIONS, glm::vec4(0.75f, 0.75f, 0.75f, alpha));
+        } else if (shape->getType() == CAPSULE_SHAPE) {
+            CapsuleShape* capsule = static_cast<CapsuleShape*>(shape);
+
+            // draw a blue sphere at the capsule endpoint                                         
+            glm::vec3 endPoint;
+            capsule->getEndPoint(endPoint);
+            endPoint = endPoint - simulationTranslation;
+            glTranslatef(endPoint.x, endPoint.y, endPoint.z);                                     
+            geometryCache->renderSphere(capsule->getRadius(), BALL_SUBDIVISIONS, BALL_SUBDIVISIONS, glm::vec4(0.6f, 0.6f, 0.8f, alpha));
+
+            // draw a yellow sphere at the capsule startpoint
+            glm::vec3 startPoint;
+            capsule->getStartPoint(startPoint);
+            startPoint = startPoint - simulationTranslation;
+            glm::vec3 axis = endPoint - startPoint;
+            glTranslatef(-axis.x, -axis.y, -axis.z);
+            geometryCache->renderSphere(capsule->getRadius(), BALL_SUBDIVISIONS, BALL_SUBDIVISIONS, glm::vec4(0.8f, 0.8f, 0.6f, alpha));
+
+            // draw a green cylinder between the two points
+            glm::vec3 origin(0.0f);
+            Avatar::renderJointConnectingCone( origin, axis, capsule->getRadius(), capsule->getRadius(), glm::vec4(0.6f, 0.8f, 0.6f, alpha));
+        }
+        glPopMatrix();
+    }
     glPopMatrix();
 }
 

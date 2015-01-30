@@ -12,15 +12,24 @@
 #ifndef hifi_GLCanvas_h
 #define hifi_GLCanvas_h
 
+#include <QDebug>
 #include <QGLWidget>
 #include <QTimer>
 
+#include <DependencyManager.h>
+
 /// customized canvas that simply forwards requests/events to the singleton application
-class GLCanvas : public QGLWidget {
+class GLCanvas : public QGLWidget, public Dependency {
     Q_OBJECT
+    SINGLETON_DEPENDENCY
+    
 public:
-    GLCanvas();
     bool isThrottleRendering() const;
+    
+    int getDeviceWidth() const;
+    int getDeviceHeight() const;
+    QSize getDeviceSize() const { return QSize(getDeviceWidth(), getDeviceHeight()); }
+    
 protected:
 
     QTimer _frameTimer;
@@ -51,6 +60,12 @@ private slots:
     void activeChanged(Qt::ApplicationState state);
     void throttleRender();
     bool eventFilter(QObject*, QEvent* event);
+    
+private:
+    GLCanvas();
+    ~GLCanvas() {
+        qDebug() << "Deleting GLCanvas";
+    }
 };
 
 #endif // hifi_GLCanvas_h

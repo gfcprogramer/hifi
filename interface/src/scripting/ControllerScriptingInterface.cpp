@@ -10,18 +10,33 @@
 //
 
 #include <HandData.h>
+#include <HFBackEvent.h>
+
 #include "Application.h"
+#include "devices/MotionTracker.h"
 #include "devices/SixenseManager.h"
 #include "ControllerScriptingInterface.h"
-#include "devices/MotionTracker.h"
+
 
 ControllerScriptingInterface::ControllerScriptingInterface() :
     _mouseCaptured(false),
     _touchCaptured(false),
     _wheelCaptured(false)
 {
+
 }
 
+void ControllerScriptingInterface::handleMetaEvent(HFMetaEvent* event) {
+    if (event->type() == HFActionEvent::startType()) {
+        emit actionStartEvent(static_cast<HFActionEvent&>(*event));
+    } else if (event->type() == HFActionEvent::endType()) {
+        emit actionEndEvent(static_cast<HFActionEvent&>(*event));
+    } else if (event->type() == HFBackEvent::startType()) {
+        emit backStartEvent();
+    } else if (event->type() == HFBackEvent::endType()) {
+        emit backEndEvent();
+    }
+}
 
 const PalmData* ControllerScriptingInterface::getPrimaryPalm() const {
     int leftPalmIndex, rightPalmIndex;
@@ -213,10 +228,7 @@ bool ControllerScriptingInterface::isKeyCaptured(QKeyEvent* event) const {
 
 bool ControllerScriptingInterface::isKeyCaptured(const KeyEvent& event) const {
     // if we've captured some combination of this key it will be in the map
-    if (_capturedKeys.contains(event.key, event)) {
-        return true;
-    }
-    return false;
+    return _capturedKeys.contains(event.key, event);
 }
 
 void ControllerScriptingInterface::captureKeyEvents(const KeyEvent& event) {
@@ -255,9 +267,9 @@ void ControllerScriptingInterface::releaseJoystick(int joystickIndex) {
     }
 }
 
-glm::vec2 ControllerScriptingInterface::getViewportDimensions() const { 
-    QGLWidget* widget = Application::getInstance()->getGLWidget();
-    return glm::vec2(widget->width(), widget->height()); 
+glm::vec2 ControllerScriptingInterface::getViewportDimensions() const {
+    auto glCanvas = DependencyManager::get<GLCanvas>();
+    return glm::vec2(glCanvas->width(), glCanvas->height());
 }
 
 AbstractInputController* ControllerScriptingInterface::createInputController(const QString& deviceName, const QString& tracker) {
@@ -297,6 +309,10 @@ AbstractInputController* ControllerScriptingInterface::createInputController(con
     }
 }
 
+void ControllerScriptingInterface::releaseInputController(AbstractInputController* input) {
+    _inputControllers.erase(input->getKey());
+}
+
 void ControllerScriptingInterface::updateInputControllers() {
     //TODO C++11 for (auto it = _inputControllers.begin(); it != _inputControllers.end(); it++) {
     for (InputControllerMap::iterator it = _inputControllers.begin(); it != _inputControllers.end(); it++) {
@@ -308,7 +324,8 @@ void ControllerScriptingInterface::updateInputControllers() {
 InputController::InputController(int deviceTrackerId, int subTrackerId, QObject* parent) :
     AbstractInputController(),
     _deviceTrackerId(deviceTrackerId),
-    _subTrackerId(subTrackerId)
+    _subTrackerId(subTrackerId),
+    _isActive(false)
 {
 }
 

@@ -11,12 +11,12 @@
 
 #include <glm/gtx/quaternion.hpp>
 
+#include <FBXReader.h>
+#include <GLMHelpers.h>
 #include <OctreeConstants.h>
 
 #include "AvatarData.h"
 #include "HeadData.h"
-
-#include "../fbx/src/FBXReader.h"
 
 HeadData::HeadData(AvatarData* owningAvatar) :
     _baseYaw(0.0f),
@@ -24,6 +24,7 @@ HeadData::HeadData(AvatarData* owningAvatar) :
     _baseRoll(0.0f),
     _leanSideways(0.0f),
     _leanForward(0.0f),
+    _torsoTwist(0.0f),
     _lookAtPosition(0.0f, 0.0f, 0.0f),
     _audioLoudness(0.0f),
     _isFaceshiftConnected(false),
@@ -73,16 +74,3 @@ void HeadData::setBlendshape(QString name, float val) {
         _blendshapeCoefficients[it.value()] = val;
     }
 }
-
-void HeadData::addYaw(float yaw) {
-    setBaseYaw(_baseYaw + yaw);
-}
-
-void HeadData::addPitch(float pitch) {
-    setBasePitch(_basePitch + pitch);
-}
-
-void HeadData::addRoll(float roll) {
-    setBaseRoll(_baseRoll + roll);
-}
-

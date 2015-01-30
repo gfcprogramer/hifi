@@ -18,7 +18,14 @@
     #include <glm/glm.hpp>
     #include <glm/gtc/quaternion.hpp>
     #include "sixense.h"
+
+#ifdef __APPLE__
+    #include <qlibrary.h>
 #endif
+
+#endif
+
+class PalmData;
 
 const unsigned int BUTTON_0 = 1U << 0; // the skinny button between 1 and 2
 const unsigned int BUTTON_1 = 1U << 5;
@@ -38,19 +45,30 @@ const bool DEFAULT_INVERT_SIXENSE_MOUSE_BUTTONS = false;
 class SixenseManager : public QObject {
     Q_OBJECT
 public:
+    static SixenseManager& getInstance();
     
-    SixenseManager();
-    ~SixenseManager();
+    void initialize();
+    bool isInitialized() const { return _isInitialized; }
+    
+    void setIsEnabled(bool isEnabled) { _isEnabled = isEnabled; }
     
     void update(float deltaTime);
     float getCursorPixelRangeMult() const;
     
-public slots:
+    float getReticleMoveSpeed() const { return _reticleMoveSpeed; }
+    void setReticleMoveSpeed(float sixenseReticleMoveSpeed) { _reticleMoveSpeed = sixenseReticleMoveSpeed; }
+    bool getInvertButtons() const { return _invertButtons; }
+    void setInvertButtons(bool invertSixenseButtons) { _invertButtons = invertSixenseButtons; }
     
+public slots:
+    void toggleSixense(bool shouldEnable);
     void setFilter(bool filter);
     void setLowVelocityFilter(bool lowVelocityFilter) { _lowVelocityFilter = lowVelocityFilter; };
 
 private:
+    SixenseManager();
+    ~SixenseManager();
+    
 #ifdef HAVE_SIXENSE
     void updateCalibration(const sixenseControllerData* controllers);
     void emulateMouse(PalmData* palm, int index);
@@ -71,11 +89,15 @@ private:
     glm::vec3 _reachUp;
     glm::vec3 _reachForward;
     float _lastDistance;
-
+    
+#ifdef __APPLE__
+    QLibrary* _sixenseLibrary;
 #endif
+    
+#endif
+    bool _isInitialized;
+    bool _isEnabled;
     bool _hydrasConnected;
-    quint64 _lastMovement;
-    glm::vec3 _amountMoved;
 
     // for mouse emulation with the two controllers
     bool _triggerPressed[2];
@@ -84,6 +106,10 @@ private:
     int _oldY[2];
     
     bool _lowVelocityFilter;
+    bool _controllersAtBase;
+    
+    float _reticleMoveSpeed = DEFAULT_SIXENSE_RETICLE_MOVE_SPEED;
+    bool _invertButtons = DEFAULT_INVERT_SIXENSE_MOUSE_BUTTONS;
 };
 
 #endif // hifi_SixenseManager_h

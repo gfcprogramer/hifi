@@ -25,12 +25,8 @@ Assignment::Type Assignment::typeForNodeType(NodeType_t nodeType) {
             return Assignment::AvatarMixerType;
         case NodeType::Agent:
             return Assignment::AgentType;
-        case NodeType::VoxelServer:
-            return Assignment::VoxelServerType;
-        case NodeType::ParticleServer:
-            return Assignment::ParticleServerType;
-        case NodeType::ModelServer:
-            return Assignment::ModelServerType;
+        case NodeType::EntityServer:
+            return Assignment::EntityServerType;
         case NodeType::MetavoxelServer:
             return Assignment::MetavoxelServerType;
         default:
@@ -135,10 +131,8 @@ const char* Assignment::getTypeName() const {
             return "avatar-mixer";
         case Assignment::AgentType:
             return "agent";
-        case Assignment::VoxelServerType:
-            return "voxel-server";
-        case Assignment::ParticleServerType:
-            return "particle-server";
+        case Assignment::EntityServerType:
+            return "entity-server";
         case Assignment::MetavoxelServerType:
             return "metavoxel-server";
         default:

@@ -9,6 +9,8 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
+#include <QFileDialog>
+
 #include "ui_scriptEditorWindow.h"
 #include "ScriptEditorWindow.h"
 #include "ScriptEditorWidget.h"
@@ -29,9 +31,8 @@
 #include "FlowLayout.h"
 #include "JSConsole.h"
 
-const int CONSOLE_HEIGHT = 150;
-
-ScriptEditorWindow::ScriptEditorWindow() :
+ScriptEditorWindow::ScriptEditorWindow(QWidget* parent) :
+    QWidget(parent),
     _ScriptEditorWindowUI(new Ui::ScriptEditorWindow),
     _loadMenu(new QMenu),
     _saveMenu(new QMenu)

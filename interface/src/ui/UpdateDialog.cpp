@@ -8,10 +8,11 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
-#include "Application.h"  // HACK ATTACK WARNING: for windows build to work, we need this ahead of QtGui
-#include <QtGui>
+#include <QDesktopServices>
+
 #include "ui_updateDialog.h"
 
+#include "Application.h"
 #include "UpdateDialog.h"
 
 
@@ -23,8 +24,8 @@ UpdateDialog::UpdateDialog(QWidget *parent, const QString& releaseNotes, const Q
     Ui::Dialog dialogUI;
     dialogUI.setupUi(this);
     
-    QString updateRequired = QString("You are currently running build %1, the latest build released is %2. \
-                                      Please download and install the most recent release to access the latest features and bug fixes.")
+    QString updateRequired = QString("You are currently running build %1, the latest build released is %2."
+                                     "\n\nPlease download and install the most recent release to access the latest features and bug fixes.")
                                       .arg(Application::getInstance()->applicationVersion(), latestVersion);
     
     setAttribute(Qt::WA_DeleteOnClose);

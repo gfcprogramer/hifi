@@ -16,11 +16,14 @@
 
 #include "ThreadedAssignment.h"
 
+class QSharedMemory;
+
 class AssignmentClient : public QCoreApplication {
     Q_OBJECT
 public:
     AssignmentClient(int &argc, char **argv);
     static const SharedAssignmentPointer& getCurrentAssignment() { return _currentAssignment; }
+
 private slots:
     void sendAssignmentRequest();
     void readPendingDatagrams();
@@ -31,6 +34,8 @@ private:
     Assignment _requestAssignment;
     static SharedAssignmentPointer _currentAssignment;
     QString _assignmentServerHostname;
+    HifiSockAddr _assignmentServerSocket;
+    QSharedMemory* _localASPortSharedMem;
 };
 
 #endif // hifi_AssignmentClient_h
